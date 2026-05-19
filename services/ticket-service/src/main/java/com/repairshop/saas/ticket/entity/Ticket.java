@@ -1,0 +1,150 @@
+package com.repairshop.saas.ticket.entity;
+
+import jakarta.persistence.*;
+import lombok.*;
+
+import java.math.BigDecimal;
+import java.time.Instant;
+import java.util.UUID;
+
+@Entity
+@Table(name = "tickets", uniqueConstraints = {
+    @UniqueConstraint(columnNames = { "shop_id", "tracking_id" })
+})
+@Getter
+@Setter
+@NoArgsConstructor
+@AllArgsConstructor
+@Builder
+public class Ticket {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.UUID)
+    private UUID id;
+
+    @Column(name = "shop_id", nullable = false)
+    private UUID shopId;
+
+    @Column(name = "customer_id", nullable = false)
+    private UUID customerId;
+
+    @Column(name = "assigned_technician_id")
+    private UUID assignedTechnicianId;
+
+    @Column(name = "tracking_id", nullable = false, length = 50)
+    private String trackingId;
+
+    @Column(name = "brand_id")
+    private UUID brandId;
+
+    @Column(name = "model_id")
+    private UUID modelId;
+
+    @Column(name = "ram_option_id")
+    private UUID ramOptionId;
+
+    @Column(name = "storage_option_id")
+    private UUID storageOptionId;
+
+    @Column(length = 100)
+    private String color;
+
+    @Column(length = 50)
+    private String imei;
+
+    @Column(nullable = false, length = 50)
+    private String status;
+
+    @Column(name = "estimated_price", precision = 12, scale = 2)
+    private BigDecimal estimatedPrice;
+
+    @Column(name = "final_price", precision = 12, scale = 2)
+    private BigDecimal finalPrice;
+
+    @Column(name = "issue_description", columnDefinition = "TEXT")
+    private String issueDescription;
+
+    /**
+     * Short, human-friendly name for the device, used directly by mobile UIs.
+     * Example: "Galaxy Z Fold7 (16GB 512GB)".
+     */
+    @Column(name = "device_display_name", length = 200)
+    private String deviceDisplayName;
+
+    /**
+     * Optional URL of the device image to show in booking, history, and receipt screens.
+     */
+    @Column(name = "device_image_url", length = 1000)
+    private String deviceImageUrl;
+
+    /**
+     * Compact summary of selected repair services for this ticket.
+     * Example: "Display Screen Combo, Battery".
+     */
+    @Column(name = "repair_services_summary", length = 500)
+    private String repairServicesSummary;
+
+    /**
+     * JSON-encoded line items for the price summary.
+     * Shape is an array of objects: [{ "label": "...", "amount": 1000 }, ...]
+     */
+    @Column(name = "price_items_json", columnDefinition = "TEXT")
+    private String priceItemsJson;
+
+    /**
+     * JSON-encoded missing / damaged parts captured in the "Device Missing Parts" screen.
+     */
+    @Column(name = "missing_parts_json", columnDefinition = "TEXT")
+    private String missingPartsJson;
+
+    /**
+     * JSON-encoded device photos metadata (front, back, video, etc.).
+     */
+    @Column(name = "device_photos_json", columnDefinition = "TEXT")
+    private String devicePhotosJson;
+
+    /**
+     * Device security type: NONE, PATTERN, PIN, PASSWORD.
+     */
+    @Column(name = "device_security_type", length = 20)
+    private String deviceSecurityType;
+
+    /**
+     * Optional raw value for the selected security type (pattern coordinates, PIN digits, or password).
+     */
+    @Column(name = "device_security_value", length = 255)
+    private String deviceSecurityValue;
+
+    /**
+     * Whether the customer has explicitly approved the repair estimate.
+     */
+    @Column(name = "customer_approval")
+    private Boolean customerApproval;
+
+    /**
+     * Estimated ready time and delivery time shown in the booking detail and device information screens.
+     */
+    @Column(name = "estimated_ready_at")
+    private Instant estimatedReadyAt;
+
+    @Column(name = "estimated_delivery_at")
+    private Instant estimatedDeliveryAt;
+
+    @Column(name = "created_at", nullable = false, updatable = false)
+    private Instant createdAt;
+
+    @Column(name = "updated_at", nullable = false)
+    private Instant updatedAt;
+
+    @PrePersist
+    void prePersist() {
+        Instant now = Instant.now();
+        if (createdAt == null) createdAt = now;
+        if (updatedAt == null) updatedAt = now;
+    }
+
+    @PreUpdate
+    void preUpdate() {
+        updatedAt = Instant.now();
+    }
+}

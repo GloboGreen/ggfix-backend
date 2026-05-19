@@ -1,0 +1,19 @@
+# In-memory DB (H2). Run with: spring.profiles.active=dev
+# MasterDataSeeder runs on startup and seeds brands, models (with imageBase64), RAM, storage, repair services.
+spring:
+  datasource:
+    url: jdbc:h2:mem:masterdata;DB_CLOSE_DELAY=-1
+    username: sa
+    password:
+    driver-class-name: org.h2.Driver
+  h2:
+    console:
+      enabled: true
+  jpa:
+    hibernate:
+      ddl-auto: update
+    database-platform: org.hibernate.dialect.H2Dialect
+    show-sql: false
+
+server:
+  port: ${PORT:8091}
