@@ -34,6 +34,7 @@ $services = @(
 
 Write-Host "Root: $root" -ForegroundColor Cyan
 Write-Host "JWT_SECRET loaded from: $EnvFile (replace later)" -ForegroundColor Cyan
+Write-Host "Profile: h2 (in-memory database, per service)" -ForegroundColor Cyan
 Write-Host "Starting services in separate PowerShell windows..." -ForegroundColor Cyan
 
 foreach ($s in $services) {
@@ -44,7 +45,7 @@ foreach ($s in $services) {
     Write-Host "Skipping missing service folder: $svcDir" -ForegroundColor Yellow
     continue
   }
-  $cmd = "cd `"$svcDir`"; `$env:PORT=$port; mvn spring-boot:run"
+  $cmd = "cd `"$svcDir`"; `$env:PORT=$port; `$env:SPRING_PROFILES_ACTIVE='h2'; mvn spring-boot:run"
   Start-Process powershell -ArgumentList "-NoProfile","-Command",$cmd | Out-Null
   Start-Sleep -Milliseconds 400
 }
