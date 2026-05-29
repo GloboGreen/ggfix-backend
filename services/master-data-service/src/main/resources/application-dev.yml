@@ -1,8 +1,10 @@
-# In-memory DB (H2). Run with: spring.profiles.active=dev
-# MasterDataSeeder runs on startup and seeds brands, models (with imageBase64), RAM, storage, repair services.
+# File-backed H2 — data PERSISTS across restarts. DB file lives at
+# ./data/masterdata.mv.db relative to the master-data-service working dir.
+# Run with: spring.profiles.active=dev
+# To wipe and start fresh: delete ./data/ folder, then restart.
 spring:
   datasource:
-    url: jdbc:h2:mem:masterdata;DB_CLOSE_DELAY=-1
+    url: jdbc:h2:file:./data/masterdata;AUTO_SERVER=TRUE;DB_CLOSE_DELAY=-1;MODE=PostgreSQL
     username: sa
     password:
     driver-class-name: org.h2.Driver
@@ -14,6 +16,25 @@ spring:
       ddl-auto: update
     database-platform: org.hibernate.dialect.H2Dialect
     show-sql: false
+  servlet:
+    multipart:
+      enabled: true
+      max-file-size: 10MB
+      max-request-size: 12MB
 
 server:
   port: ${PORT:8091}
+
+# WARNING: these dev defaults contain real Cloudinary credentials.
+# - Do NOT commit this file with real secrets to a public repo.
+# - The api-secret below should be ROTATED in the Cloudinary dashboard.
+# - Production deployments must override these via env vars
+#   (CLOUDINARY_CLOUD_NAME / CLOUDINARY_API_KEY / CLOUDINARY_API_SECRET / CLOUDINARY_FOLDER).
+app:
+  cloudinary:
+    cloud-name: ${CLOUDINARY_CLOUD_NAME:dg6c0g4gi}
+    api-key: ${CLOUDINARY_API_KEY:694635395288588}
+    api-secret: ${CLOUDINARY_API_SECRET:geEEuXbhDF5Wy0T8RuOTM8IpXh8}
+    # Base folder. Admin pages append a subfolder like "categories", "brands",
+    # "models" so uploads land in ggifx/categories etc.
+    folder: ${CLOUDINARY_FOLDER:ggifx}

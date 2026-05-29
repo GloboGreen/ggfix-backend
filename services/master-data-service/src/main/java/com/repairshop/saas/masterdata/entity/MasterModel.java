@@ -6,7 +6,13 @@ import lombok.*;
 import java.util.UUID;
 
 @Entity
-@Table(name = "master_models", uniqueConstraints = @UniqueConstraint(columnNames = { "brand_id", "name" }))
+@Table(
+        name = "master_models",
+        uniqueConstraints = {
+                @UniqueConstraint(name = "uq_model_brand_name", columnNames = { "brand_id", "name" }),
+                @UniqueConstraint(name = "uq_model_series_slug", columnNames = { "series_id", "slug" })
+        }
+)
 @Getter
 @Setter
 @NoArgsConstructor
@@ -24,23 +30,27 @@ public class MasterModel {
     @Column(nullable = false, length = 255)
     private String name;
 
-    /**
-     * Optional public URL or path for a hero image of the device / spare part.
-     */
+    /** SEO-friendly slug, unique within (series_id). */
+    @Column(length = 180)
+    private String slug;
+
     @Column(name = "image_url", length = 500)
     private String imageUrl;
 
-    /**
-     * Optional base64-encoded image (PNG/JPEG) for device or spare part.
-     * When set, mobile uses data:image/png;base64,{imageBase64} for dropdowns and lists.
-     */
     @Column(name = "image_base64", columnDefinition = "TEXT")
     private String imageBase64;
 
     /**
-     * Simple category flag so the UI can distinguish between full devices vs spare parts.
-     * Examples: DEVICE, SPARE_PART. Stored as uppercase string for flexibility.
+     * Free-form classification label for the UI (e.g. DEVICE / SPARE_PART).
      */
     @Column(name = "category", length = 50)
     private String category;
+
+    /** Optional FK -> master_device_categories.id. */
+    @Column(name = "category_id")
+    private UUID categoryId;
+
+    /** Optional FK -> master_device_series.id. */
+    @Column(name = "series_id")
+    private UUID seriesId;
 }

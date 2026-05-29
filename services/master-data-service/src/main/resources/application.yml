@@ -5,8 +5,20 @@ spring:
     url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:repairshop}
     username: ${DB_USER:postgres}
     password: ${DB_PASSWORD:postgres}
+  servlet:
+    multipart:
+      max-file-size: 10MB
+      max-request-size: 12MB
 server:
   port: ${PORT:8091}
 app:
   jwt:
     secret: ${JWT_SECRET:your-256-bit-secret-key-for-repair-shop-saas-jwt-signing}
+  cloudinary:
+    # Set these env vars to upload to Cloudinary. If any of the three is blank,
+    # /media/upload falls back to returning an inline base64 data URI so the
+    # admin still works end-to-end without external creds.
+    cloud-name: ${CLOUDINARY_CLOUD_NAME:}
+    api-key: ${CLOUDINARY_API_KEY:}
+    api-secret: ${CLOUDINARY_API_SECRET:}
+    folder: ${CLOUDINARY_FOLDER:ggfix/master}

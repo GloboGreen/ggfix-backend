@@ -1,7 +1,8 @@
-# H2 in-memory for E2E (no PostgreSQL)
+# File-backed H2 for dev so bookings/orders survive a service restart
+# (in-memory would wipe all data every time the service is restarted).
 spring:
   datasource:
-    url: jdbc:h2:mem:orders;DB_CLOSE_DELAY=-1
+    url: jdbc:h2:file:./data/orders;AUTO_SERVER=TRUE;DB_CLOSE_DELAY=-1;MODE=PostgreSQL
     username: sa
     password:
     driver-class-name: org.h2.Driver

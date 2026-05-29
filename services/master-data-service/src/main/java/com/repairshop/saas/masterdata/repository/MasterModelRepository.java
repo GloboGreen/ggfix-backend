@@ -12,4 +12,8 @@ import org.springframework.stereotype.Repository;
 public interface MasterModelRepository extends JpaRepository<MasterModel, UUID> {
 
     List<MasterModel> findByBrandIdOrderByName(UUID brandId);
+
+    List<MasterModel> findBySeriesIdOrderByName(UUID seriesId);
+
+    List<MasterModel> findByCategoryIdOrderByName(UUID categoryId);
 }

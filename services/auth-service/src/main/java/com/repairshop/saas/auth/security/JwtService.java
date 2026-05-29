@@ -40,6 +40,22 @@ public class JwtService {
                 .compact();
     }
 
+    /**
+     * Issue a JWT for a platform customer (mobile app). No shopId claim — customers
+     * are not tied to any single shop.
+     */
+    public String issueCustomerToken(UUID customerUserId, List<String> roles) {
+        Date now = new Date();
+        Date expiry = new Date(now.getTime() + expiryMs);
+        return Jwts.builder()
+                .subject(customerUserId.toString())
+                .claim("roles", roles)
+                .issuedAt(now)
+                .expiration(expiry)
+                .signWith(key)
+                .compact();
+    }
+
     public Claims parseClaims(String token) {
         return Jwts.parser()
                 .verifyWith(key)

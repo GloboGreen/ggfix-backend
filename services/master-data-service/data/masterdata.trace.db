@@ -1,0 +1,18 @@
+2026-05-29 17:22:33.022912+05:30 jdbc[3]: exception
+org.h2.jdbc.JdbcSQLSyntaxErrorException: Syntax error in SQL statement "create table master_device_config_options (id uuid not null, field_id uuid not null, sort_order integer not null, [*]value varchar(255) not null, primary key (id))"; expected "identifier"; SQL statement:
+create table master_device_config_options (id uuid not null, field_id uuid not null, sort_order integer not null, value varchar(255) not null, primary key (id)) [42001-232]
+2026-05-29 17:22:33.039624+05:30 jdbc[3]: exception
+org.h2.jdbc.JdbcSQLSyntaxErrorException: Table "MASTER_DEVICE_CONFIG_OPTIONS" not found; SQL statement:
+create index idx_device_config_option_field on master_device_config_options (field_id) [42102-232]
+2026-05-29 17:22:48.176134+05:30 jdbc[3]: exception
+org.h2.jdbc.JdbcSQLSyntaxErrorException: Table "MASTER_DEVICE_CONFIG_OPTIONS" not found; SQL statement:
+insert into master_device_config_options (field_id,sort_order,value,id) values (?,?,?,?) [42102-232]
+2026-05-29 17:23:02.534600+05:30 jdbc[3]: exception
+org.h2.jdbc.JdbcSQLSyntaxErrorException: Table "MASTER_DEVICE_CONFIG_OPTIONS" not found; SQL statement:
+insert into master_device_config_options (field_id,sort_order,value,id) values (?,?,?,?) [42102-232]
+2026-05-29 17:30:53.652610+05:30 jdbc[3]: exception
+org.h2.jdbc.JdbcSQLDataException: Value too long for column "OPTION_VALUE CHARACTER VARYING(255)": "'Intel Core Ultra 3 Intel Core Ultra 5 Intel Core Ultra 7 Intel Core Ultra 9 Int... (861)"; SQL statement:
+insert into master_device_config_options (field_id,sort_order,option_value,id) values (?,?,?,?) [22001-232]
+2026-05-29 17:30:54.882874+05:30 jdbc[3]: exception
+org.h2.jdbc.JdbcSQLDataException: Value too long for column "OPTION_VALUE CHARACTER VARYING(255)": "'Intel Core Ultra 3 Intel Core Ultra 5 Intel Core Ultra 7 Intel Core Ultra 9 Int... (861)"; SQL statement:
+insert into master_device_config_options (field_id,sort_order,option_value,id) values (?,?,?,?) [22001-232]

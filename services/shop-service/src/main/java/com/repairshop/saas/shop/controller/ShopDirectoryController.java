@@ -1,0 +1,355 @@
+package com.repairshop.saas.shop.controller;
+
+import com.repairshop.saas.shop.dto.*;
+import com.repairshop.saas.shop.entity.Shop;
+import com.repairshop.saas.shop.entity.ShopImage;
+import com.repairshop.saas.shop.entity.ShopOfferedService;
+import com.repairshop.saas.shop.entity.ShopPickupSlot;
+import com.repairshop.saas.shop.exception.ResourceNotFoundException;
+import com.repairshop.saas.shop.repository.ShopImageRepository;
+import com.repairshop.saas.shop.repository.ShopOfferedServiceRepository;
+import com.repairshop.saas.shop.repository.ShopPickupSlotRepository;
+import com.repairshop.saas.shop.repository.ShopRepository;
+import lombok.RequiredArgsConstructor;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+
+import java.math.BigDecimal;
+import java.util.Comparator;
+import java.util.List;
+import java.util.UUID;
+
+@RestController
+@RequestMapping("/shops")
+@RequiredArgsConstructor
+public class ShopDirectoryController {
+
+    private final ShopRepository shopRepository;
+    private final ShopOfferedServiceRepository offeredServiceRepository;
+    private final ShopImageRepository shopImageRepository;
+    private final ShopPickupSlotRepository pickupSlotRepository;
+
+    // -------------------------------------------------------------------------
+    // PUBLIC READ ENDPOINTS
+    // -------------------------------------------------------------------------
+
+    @GetMapping
+    public ResponseEntity<List<ShopSummaryResponse>> listShops(
+            @RequestParam(value = "q", required = false) String q,
+            @RequestParam(value = "limit", required = false, defaultValue = "50") Integer limit) {
+
+        String needle = q == null ? null : q.trim().toLowerCase();
+        List<ShopSummaryResponse> result = shopRepository.findByIsActiveTrue().stream()
+                .filter(s -> {
+                    if (needle == null || needle.isEmpty()) return true;
+                    String name = s.getName() == null ? "" : s.getName().toLowerCase();
+                    String city = s.getCity() == null ? "" : s.getCity().toLowerCase();
+                    return name.contains(needle) || city.contains(needle);
+                })
+                .sorted(Comparator.comparing(
+                        (Shop s) -> s.getRating() == null ? BigDecimal.ZERO : s.getRating()).reversed())
+                .limit(limit == null || limit <= 0 ? 50 : limit)
+                .map(s -> toSummary(s, null))
+                .toList();
+        return ResponseEntity.ok(result);
+    }
+
+    @GetMapping("/nearby")
+    public ResponseEntity<List<ShopSummaryResponse>> nearby(
+            @RequestParam(value = "lat", required = false) Double lat,
+            @RequestParam(value = "lng", required = false) Double lng,
+            @RequestParam(value = "radiusKm", required = false) Double radiusKm,
+            @RequestParam(value = "limit", required = false, defaultValue = "50") Integer limit,
+            @RequestParam(value = "activeOnly", required = false, defaultValue = "false") Boolean activeOnly) {
+
+        // Default: return ALL shops so the customer view never silently goes
+        // empty just because an admin forgot to toggle Active. Pass
+        // ?activeOnly=true to opt in to the stricter filter.
+        List<Shop> shops = Boolean.TRUE.equals(activeOnly)
+                ? shopRepository.findByIsActiveTrue()
+                : shopRepository.findAll();
+
+        if (lat == null || lng == null) {
+            List<ShopSummaryResponse> sorted = shops.stream()
+                    .sorted(Comparator.comparing(
+                            (Shop s) -> s.getRating() == null ? BigDecimal.ZERO : s.getRating()).reversed())
+                    .limit(limit == null || limit <= 0 ? 50 : limit)
+                    .map(s -> toSummary(s, null))
+                    .toList();
+            return ResponseEntity.ok(sorted);
+        }
+
+        final double effectiveRadius = radiusKm == null ? Double.MAX_VALUE : radiusKm;
+        List<ShopSummaryResponse> result = shops.stream()
+                .map(s -> {
+                    Double distance = null;
+                    if (s.getLatitude() != null && s.getLongitude() != null) {
+                        distance = haversineKm(
+                                lat, lng,
+                                s.getLatitude().doubleValue(),
+                                s.getLongitude().doubleValue());
+                    }
+                    return toSummary(s, distance);
+                })
+                .filter(s -> {
+                    if (s.getDistanceKm() == null) return false;
+                    return s.getDistanceKm() <= effectiveRadius;
+                })
+                .sorted(Comparator.comparing(
+                        ShopSummaryResponse::getDistanceKm,
+                        Comparator.nullsLast(Double::compareTo)))
+                .limit(limit == null || limit <= 0 ? 50 : limit)
+                .toList();
+        return ResponseEntity.ok(result);
+    }
+
+    @GetMapping("/{id}")
+    public ResponseEntity<ShopDetailsResponse> getShop(@PathVariable UUID id) {
+        Shop shop = shopRepository.findById(id)
+                .orElseThrow(() -> new ResourceNotFoundException("Shop not found: " + id));
+        return ResponseEntity.ok(toDetails(shop));
+    }
+
+    @GetMapping("/by-slug/{slug}")
+    public ResponseEntity<ShopDetailsResponse> getShopBySlug(@PathVariable String slug) {
+        Shop shop = shopRepository.findBySlug(slug)
+                .orElseThrow(() -> new ResourceNotFoundException("Shop not found: " + slug));
+        return ResponseEntity.ok(toDetails(shop));
+    }
+
+    @GetMapping("/{id}/pickup-slots")
+    public ResponseEntity<List<PickupSlotResponse>> getPickupSlots(@PathVariable UUID id) {
+        if (!shopRepository.existsById(id)) {
+            throw new ResourceNotFoundException("Shop not found: " + id);
+        }
+        List<PickupSlotResponse> slots = pickupSlotRepository.findByShopId(id).stream()
+                .map(this::toSlotResponse)
+                .toList();
+        return ResponseEntity.ok(slots);
+    }
+
+    // -------------------------------------------------------------------------
+    // ADMIN ENDPOINTS (require auth via SecurityConfig)
+    // -------------------------------------------------------------------------
+
+    @PostMapping
+    public ResponseEntity<ShopDetailsResponse> createShop(@RequestBody ShopUpsertRequest req) {
+        Shop shop = Shop.builder()
+                .name(req.getName())
+                .slug(req.getSlug())
+                .email(req.getEmail())
+                .phone(req.getPhone())
+                .address(req.getAddress())
+                .timezone(req.getTimezone())
+                .isActive(req.getIsActive() == null ? Boolean.TRUE : req.getIsActive())
+                .latitude(req.getLatitude())
+                .longitude(req.getLongitude())
+                .city(req.getCity())
+                .state(req.getState())
+                .pincode(req.getPincode())
+                .rating(req.getRating())
+                .hoursText(req.getHoursText())
+                .heroImageUrl(req.getHeroImageUrl())
+                .description(req.getDescription())
+                .build();
+        Shop saved = shopRepository.save(shop);
+        return ResponseEntity.ok(toDetails(saved));
+    }
+
+    @PutMapping("/{id}")
+    public ResponseEntity<ShopDetailsResponse> updateShop(@PathVariable UUID id,
+                                                          @RequestBody ShopUpsertRequest req) {
+        Shop shop = shopRepository.findById(id)
+                .orElseThrow(() -> new ResourceNotFoundException("Shop not found: " + id));
+        if (req.getName() != null) shop.setName(req.getName());
+        if (req.getSlug() != null) shop.setSlug(req.getSlug());
+        if (req.getEmail() != null) shop.setEmail(req.getEmail());
+        if (req.getPhone() != null) shop.setPhone(req.getPhone());
+        if (req.getAddress() != null) shop.setAddress(req.getAddress());
+        if (req.getTimezone() != null) shop.setTimezone(req.getTimezone());
+        if (req.getIsActive() != null) shop.setIsActive(req.getIsActive());
+        if (req.getLatitude() != null) shop.setLatitude(req.getLatitude());
+        if (req.getLongitude() != null) shop.setLongitude(req.getLongitude());
+        if (req.getCity() != null) shop.setCity(req.getCity());
+        if (req.getState() != null) shop.setState(req.getState());
+        if (req.getPincode() != null) shop.setPincode(req.getPincode());
+        if (req.getRating() != null) shop.setRating(req.getRating());
+        if (req.getHoursText() != null) shop.setHoursText(req.getHoursText());
+        if (req.getHeroImageUrl() != null) shop.setHeroImageUrl(req.getHeroImageUrl());
+        if (req.getDescription() != null) shop.setDescription(req.getDescription());
+        return ResponseEntity.ok(toDetails(shopRepository.save(shop)));
+    }
+
+    @PatchMapping("/{id}/status")
+    public ResponseEntity<ShopDetailsResponse> setStatus(@PathVariable UUID id,
+                                                        @RequestParam("active") boolean active) {
+        Shop shop = shopRepository.findById(id)
+                .orElseThrow(() -> new ResourceNotFoundException("Shop not found: " + id));
+        shop.setIsActive(active);
+        return ResponseEntity.ok(toDetails(shopRepository.save(shop)));
+    }
+
+    @PostMapping("/{id}/services")
+    public ResponseEntity<ShopOfferedService> addService(@PathVariable UUID id,
+                                                         @RequestBody ShopServiceRequest req) {
+        if (!shopRepository.existsById(id)) {
+            throw new ResourceNotFoundException("Shop not found: " + id);
+        }
+        if (req.getServiceCode() == null || req.getServiceCode().isBlank()) {
+            throw new IllegalArgumentException("serviceCode is required");
+        }
+        ShopOfferedService entity = offeredServiceRepository
+                .findByShopIdAndServiceCode(id, req.getServiceCode())
+                .orElseGet(() -> ShopOfferedService.builder()
+                        .shopId(id)
+                        .serviceCode(req.getServiceCode())
+                        .isEnabled(req.getIsEnabled() == null ? Boolean.TRUE : req.getIsEnabled())
+                        .build());
+        if (req.getIsEnabled() != null) entity.setIsEnabled(req.getIsEnabled());
+        return ResponseEntity.ok(offeredServiceRepository.save(entity));
+    }
+
+    @DeleteMapping("/{id}/services/{code}")
+    public ResponseEntity<Void> removeService(@PathVariable UUID id, @PathVariable String code) {
+        ShopOfferedService entity = offeredServiceRepository.findByShopIdAndServiceCode(id, code)
+                .orElseThrow(() -> new ResourceNotFoundException(
+                        "Service not found for shop: " + code));
+        offeredServiceRepository.delete(entity);
+        return ResponseEntity.noContent().build();
+    }
+
+    @PostMapping("/{id}/images")
+    public ResponseEntity<ShopImage> addImage(@PathVariable UUID id,
+                                              @RequestBody ShopImageRequest req) {
+        if (!shopRepository.existsById(id)) {
+            throw new ResourceNotFoundException("Shop not found: " + id);
+        }
+        if (req.getImageUrl() == null || req.getImageUrl().isBlank()) {
+            throw new IllegalArgumentException("imageUrl is required");
+        }
+        ShopImage image = ShopImage.builder()
+                .shopId(id)
+                .imageUrl(req.getImageUrl())
+                .sortOrder(req.getSortOrder() == null ? 0 : req.getSortOrder())
+                .build();
+        return ResponseEntity.ok(shopImageRepository.save(image));
+    }
+
+    @DeleteMapping("/{id}/images/{imageId}")
+    public ResponseEntity<Void> removeImage(@PathVariable UUID id, @PathVariable UUID imageId) {
+        ShopImage image = shopImageRepository.findById(imageId)
+                .orElseThrow(() -> new ResourceNotFoundException("Image not found: " + imageId));
+        if (!image.getShopId().equals(id)) {
+            throw new ResourceNotFoundException("Image not found for shop: " + imageId);
+        }
+        shopImageRepository.delete(image);
+        return ResponseEntity.noContent().build();
+    }
+
+    @PostMapping("/{id}/pickup-slots")
+    public ResponseEntity<PickupSlotResponse> addPickupSlot(@PathVariable UUID id,
+                                                            @RequestBody ShopPickupSlotRequest req) {
+        if (!shopRepository.existsById(id)) {
+            throw new ResourceNotFoundException("Shop not found: " + id);
+        }
+        if (req.getStartTime() == null || req.getEndTime() == null) {
+            throw new IllegalArgumentException("startTime and endTime are required");
+        }
+        ShopPickupSlot slot = ShopPickupSlot.builder()
+                .shopId(id)
+                .dayOfWeek(req.getDayOfWeek())
+                .startTime(req.getStartTime())
+                .endTime(req.getEndTime())
+                .capacity(req.getCapacity() == null ? 10 : req.getCapacity())
+                .build();
+        return ResponseEntity.ok(toSlotResponse(pickupSlotRepository.save(slot)));
+    }
+
+    @DeleteMapping("/{id}/pickup-slots/{slotId}")
+    public ResponseEntity<Void> removePickupSlot(@PathVariable UUID id, @PathVariable UUID slotId) {
+        ShopPickupSlot slot = pickupSlotRepository.findById(slotId)
+                .orElseThrow(() -> new ResourceNotFoundException("Slot not found: " + slotId));
+        if (!slot.getShopId().equals(id)) {
+            throw new ResourceNotFoundException("Slot not found for shop: " + slotId);
+        }
+        pickupSlotRepository.delete(slot);
+        return ResponseEntity.noContent().build();
+    }
+
+    // -------------------------------------------------------------------------
+    // Mapping helpers
+    // -------------------------------------------------------------------------
+
+    private ShopSummaryResponse toSummary(Shop s, Double distanceKm) {
+        return ShopSummaryResponse.builder()
+                .id(s.getId())
+                .name(s.getName())
+                .slug(s.getSlug())
+                .city(s.getCity())
+                .address(s.getAddress())
+                .phone(s.getPhone())
+                .latitude(s.getLatitude())
+                .longitude(s.getLongitude())
+                .rating(s.getRating())
+                .heroImageUrl(s.getHeroImageUrl())
+                .distanceKm(distanceKm)
+                .hoursText(s.getHoursText())
+                .isOpen(Boolean.TRUE) // simple default; refine with real logic when hours model is structured
+                .build();
+    }
+
+    private ShopDetailsResponse toDetails(Shop s) {
+        List<String> services = offeredServiceRepository.findByShopId(s.getId()).stream()
+                .filter(svc -> svc.getIsEnabled() == null || svc.getIsEnabled())
+                .map(ShopOfferedService::getServiceCode)
+                .toList();
+        List<String> images = shopImageRepository.findByShopIdOrderBySortOrderAsc(s.getId()).stream()
+                .map(ShopImage::getImageUrl)
+                .toList();
+        List<PickupSlotResponse> slots = pickupSlotRepository.findByShopId(s.getId()).stream()
+                .map(this::toSlotResponse)
+                .toList();
+        return ShopDetailsResponse.builder()
+                .id(s.getId())
+                .name(s.getName())
+                .slug(s.getSlug())
+                .city(s.getCity())
+                .address(s.getAddress())
+                .phone(s.getPhone())
+                .latitude(s.getLatitude())
+                .longitude(s.getLongitude())
+                .rating(s.getRating())
+                .heroImageUrl(s.getHeroImageUrl())
+                .hoursText(s.getHoursText())
+                .isOpen(Boolean.TRUE)
+                .description(s.getDescription())
+                .email(s.getEmail())
+                .state(s.getState())
+                .pincode(s.getPincode())
+                .services(services)
+                .images(images)
+                .pickupSlots(slots)
+                .build();
+    }
+
+    private PickupSlotResponse toSlotResponse(ShopPickupSlot slot) {
+        return PickupSlotResponse.builder()
+                .id(slot.getId())
+                .dayOfWeek(slot.getDayOfWeek())
+                .startTime(slot.getStartTime())
+                .endTime(slot.getEndTime())
+                .capacity(slot.getCapacity())
+                .build();
+    }
+
+    private static double haversineKm(double lat1, double lon1, double lat2, double lon2) {
+        final double R = 6371.0088; // mean Earth radius in km
+        double dLat = Math.toRadians(lat2 - lat1);
+        double dLon = Math.toRadians(lon2 - lon1);
+        double a = Math.sin(dLat / 2) * Math.sin(dLat / 2)
+                + Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2))
+                * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+        double c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+        return R * c;
+    }
+}
