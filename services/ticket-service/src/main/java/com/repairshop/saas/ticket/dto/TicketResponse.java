@@ -26,6 +26,12 @@ public class TicketResponse {
     @Schema(description = "Customer ID")
     private UUID customerId;
 
+    @Schema(description = "Customer name (denormalized)")
+    private String customerName;
+
+    @Schema(description = "Customer phone (denormalized)")
+    private String customerPhone;
+
     @Schema(description = "Assigned technician ID")
     private UUID assignedTechnicianId;
 

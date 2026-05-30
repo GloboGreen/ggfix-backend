@@ -20,14 +20,23 @@ public class MarketplaceProduct {
     @GeneratedValue(strategy = GenerationType.UUID)
     private UUID id;
 
-    @Column(name = "shop_id", nullable = false)
+    @Column(name = "shop_id")
     private UUID shopId;
+
+    @Column(name = "seller_user_id")
+    private UUID sellerUserId;
 
     @Column(name = "brand_id")
     private UUID brandId;
 
     @Column(name = "model_id")
     private UUID modelId;
+
+    @Column(name = "ram_option_id")
+    private UUID ramOptionId;
+
+    @Column(name = "storage_option_id")
+    private UUID storageOptionId;
 
     @Column(nullable = false, length = 255)
     private String title;
@@ -50,11 +59,23 @@ public class MarketplaceProduct {
     @Column(length = 100)
     private String color;
 
+    @Column(name = "ram_label", length = 50)
+    private String ramLabel;
+
     @Column(name = "storage_label", length = 50)
     private String storageLabel;
 
     @Column(length = 50)
     private String network;
+
+    @Column(length = 50)
+    private String imei;
+
+    @Column(name = "working_condition", length = 30)
+    private String workingCondition;  // WORKING | DEAD | UNKNOWN
+
+    @Column(name = "description_type", length = 30)
+    private String descriptionType;  // DETAILED | SHORT | DEAD_SHORT
 
     @Column(name = "image_url", length = 500)
     private String imageUrl;
@@ -62,6 +83,10 @@ public class MarketplaceProduct {
     /** JSON / comma-separated list of additional image URLs */
     @Column(name = "extra_image_urls", columnDefinition = "TEXT")
     private String extraImageUrls;
+
+    /** JSON blob with the full assessment data (screening answers, conditions, issues, accessories, warranty). */
+    @Column(name = "assessment_json", columnDefinition = "TEXT")
+    private String assessmentJson;
 
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;

@@ -13,8 +13,11 @@ import java.util.UUID;
 @Builder
 public class ProductRequest {
     private UUID shopId;
+    private UUID sellerUserId;
     private UUID brandId;
     private UUID modelId;
+    private UUID ramOptionId;
+    private UUID storageOptionId;
 
     @NotBlank
     private String title;
@@ -29,8 +32,13 @@ public class ProductRequest {
 
     private String conditionLabel;
     private String color;
+    private String ramLabel;
     private String storageLabel;
     private String network;
+    private String imei;
+    private String workingCondition;
+    private String descriptionType;
     private String imageUrl;
     private List<String> extraImageUrls;
+    private String assessmentJson;
 }

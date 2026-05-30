@@ -6,6 +6,7 @@ import com.repairshop.saas.marketplace.entity.MarketplaceProduct;
 import com.repairshop.saas.marketplace.exception.ResourceNotFoundException;
 import com.repairshop.saas.marketplace.repository.MarketplaceProductRepository;
 import com.repairshop.saas.marketplace.service.ProductMapper;
+import jakarta.servlet.http.HttpServletRequest;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -53,11 +54,21 @@ public class MarketplaceController {
     }
 
     @PostMapping("/products")
-    public ResponseEntity<ProductResponse> createProduct(@RequestBody ProductRequest req) {
+    public ResponseEntity<ProductResponse> createProduct(HttpServletRequest httpReq, @RequestBody ProductRequest req) {
+        // Prefer the seller's userId from the JWT filter; fall back to the body
+        // (admin tooling / seed scripts may send it explicitly).
+        UUID sellerUserId = req.getSellerUserId();
+        Object u = httpReq.getAttribute("userId");
+        if (u != null) {
+            try { sellerUserId = UUID.fromString(u.toString()); } catch (IllegalArgumentException ignored) {}
+        }
         MarketplaceProduct p = MarketplaceProduct.builder()
                 .shopId(req.getShopId())
+                .sellerUserId(sellerUserId)
                 .brandId(req.getBrandId())
                 .modelId(req.getModelId())
+                .ramOptionId(req.getRamOptionId())
+                .storageOptionId(req.getStorageOptionId())
                 .title(req.getTitle())
                 .description(req.getDescription())
                 .type(req.getType() != null ? req.getType().toUpperCase() : "SELL")
@@ -65,10 +76,15 @@ public class MarketplaceController {
                 .status(req.getStatus() != null ? req.getStatus().toUpperCase() : "ACTIVE")
                 .conditionLabel(req.getConditionLabel())
                 .color(req.getColor())
+                .ramLabel(req.getRamLabel())
                 .storageLabel(req.getStorageLabel())
                 .network(req.getNetwork())
+                .imei(req.getImei())
+                .workingCondition(req.getWorkingCondition())
+                .descriptionType(req.getDescriptionType())
                 .imageUrl(req.getImageUrl())
                 .extraImageUrls(ProductMapper.serializeExtraImages(req.getExtraImageUrls()))
+                .assessmentJson(req.getAssessmentJson())
                 .build();
         return ResponseEntity.ok(ProductMapper.toResponse(productRepo.save(p)));
     }
@@ -87,10 +103,17 @@ public class MarketplaceController {
         if (req.getStatus() != null) p.setStatus(req.getStatus().toUpperCase());
         if (req.getConditionLabel() != null) p.setConditionLabel(req.getConditionLabel());
         if (req.getColor() != null) p.setColor(req.getColor());
+        if (req.getRamLabel() != null) p.setRamLabel(req.getRamLabel());
         if (req.getStorageLabel() != null) p.setStorageLabel(req.getStorageLabel());
+        if (req.getRamOptionId() != null) p.setRamOptionId(req.getRamOptionId());
+        if (req.getStorageOptionId() != null) p.setStorageOptionId(req.getStorageOptionId());
         if (req.getNetwork() != null) p.setNetwork(req.getNetwork());
+        if (req.getImei() != null) p.setImei(req.getImei());
+        if (req.getWorkingCondition() != null) p.setWorkingCondition(req.getWorkingCondition());
+        if (req.getDescriptionType() != null) p.setDescriptionType(req.getDescriptionType());
         if (req.getImageUrl() != null) p.setImageUrl(req.getImageUrl());
         if (req.getExtraImageUrls() != null) p.setExtraImageUrls(ProductMapper.serializeExtraImages(req.getExtraImageUrls()));
+        if (req.getAssessmentJson() != null) p.setAssessmentJson(req.getAssessmentJson());
         return ResponseEntity.ok(ProductMapper.toResponse(productRepo.save(p)));
     }
 

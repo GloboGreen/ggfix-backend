@@ -22,6 +22,12 @@ public class TicketRequest {
     @Schema(description = "Customer ID", required = true)
     private UUID customerId;
 
+    @Schema(description = "Customer name (denormalized for booking list)")
+    private String customerName;
+
+    @Schema(description = "Customer phone (denormalized for booking list)")
+    private String customerPhone;
+
     @Schema(description = "Device brand ID (master_brands)")
     private UUID brandId;
 

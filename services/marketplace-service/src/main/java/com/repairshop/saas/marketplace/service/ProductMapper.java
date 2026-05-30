@@ -21,8 +21,11 @@ public final class ProductMapper {
         return ProductResponse.builder()
                 .id(p.getId())
                 .shopId(p.getShopId())
+                .sellerUserId(p.getSellerUserId())
                 .brandId(p.getBrandId())
                 .modelId(p.getModelId())
+                .ramOptionId(p.getRamOptionId())
+                .storageOptionId(p.getStorageOptionId())
                 .title(p.getTitle())
                 .description(p.getDescription())
                 .type(p.getType())
@@ -30,10 +33,15 @@ public final class ProductMapper {
                 .status(p.getStatus())
                 .conditionLabel(p.getConditionLabel())
                 .color(p.getColor())
+                .ramLabel(p.getRamLabel())
                 .storageLabel(p.getStorageLabel())
                 .network(p.getNetwork())
+                .imei(p.getImei())
+                .workingCondition(p.getWorkingCondition())
+                .descriptionType(p.getDescriptionType())
                 .imageUrl(p.getImageUrl())
                 .extraImageUrls(parseExtraImages(p.getExtraImageUrls()))
+                .assessmentJson(p.getAssessmentJson())
                 .build();
     }
 

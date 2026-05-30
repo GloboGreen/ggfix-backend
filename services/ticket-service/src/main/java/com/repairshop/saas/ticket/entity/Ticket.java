@@ -28,6 +28,14 @@ public class Ticket {
     @Column(name = "customer_id", nullable = false)
     private UUID customerId;
 
+    /** Denormalized customer name/phone so the bookings list can render without
+     *  a cross-service lookup. */
+    @Column(name = "customer_name", length = 200)
+    private String customerName;
+
+    @Column(name = "customer_phone", length = 30)
+    private String customerPhone;
+
     @Column(name = "assigned_technician_id")
     private UUID assignedTechnicianId;
 

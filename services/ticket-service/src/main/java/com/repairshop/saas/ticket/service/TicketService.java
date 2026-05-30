@@ -79,6 +79,8 @@ public class TicketService {
         Ticket ticket = Ticket.builder()
                 .shopId(shopId)
                 .customerId(request.getCustomerId())
+                .customerName(request.getCustomerName())
+                .customerPhone(request.getCustomerPhone())
                 .brandId(request.getBrandId())
                 .modelId(request.getModelId())
                 .ramOptionId(request.getRamOptionId())
@@ -110,6 +112,8 @@ public class TicketService {
         Ticket ticket = ticketRepository.findByShopIdAndId(shopId, id)
                 .orElseThrow(() -> new ResourceNotFoundException("Ticket not found: " + id));
         ticket.setCustomerId(request.getCustomerId());
+        if (request.getCustomerName() != null) ticket.setCustomerName(request.getCustomerName());
+        if (request.getCustomerPhone() != null) ticket.setCustomerPhone(request.getCustomerPhone());
         ticket.setBrandId(request.getBrandId());
         ticket.setModelId(request.getModelId());
         ticket.setRamOptionId(request.getRamOptionId());
@@ -191,6 +195,8 @@ public class TicketService {
                 .id(t.getId())
                 .shopId(t.getShopId())
                 .customerId(t.getCustomerId())
+                .customerName(t.getCustomerName())
+                .customerPhone(t.getCustomerPhone())
                 .assignedTechnicianId(t.getAssignedTechnicianId())
                 .trackingId(t.getTrackingId())
                 .brandId(t.getBrandId())
