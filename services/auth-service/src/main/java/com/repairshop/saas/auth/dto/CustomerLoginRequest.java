@@ -1,7 +1,6 @@
 package com.repairshop.saas.auth.dto;
 
 import io.swagger.v3.oas.annotations.media.Schema;
-import jakarta.validation.constraints.NotBlank;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -20,7 +19,9 @@ public class CustomerLoginRequest {
     @Schema(description = "Email (one of mobile or email required)", example = "rahul@example.com")
     private String email;
 
-    @NotBlank(message = "Password is required")
-    @Schema(description = "Password", required = true)
+    @Schema(description = "Password (one of password or otp is required)")
     private String password;
+
+    @Schema(description = "One-time password (one of password or otp is required)", example = "123456")
+    private String otp;
 }

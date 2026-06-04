@@ -38,4 +38,21 @@ public class LoginResponse {
 
     @Schema(description = "User roles")
     private List<String> roles;
+
+    @Schema(description = "Display name of the active shop (for the JWT shopId)")
+    private String shopName;
+
+    @Schema(description = "All shops the user can access (SHOP_OWNER only). One of these is the active shop matching shopId.")
+    private List<ShopAccess> shops;
+
+    @Data
+    @NoArgsConstructor
+    @AllArgsConstructor
+    @Builder
+    public static class ShopAccess {
+        private String id;
+        private String name;
+        private String slug;
+        private Boolean isActive;
+    }
 }

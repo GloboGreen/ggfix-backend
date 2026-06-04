@@ -1,9 +1,11 @@
 package com.repairshop.saas.order.controller;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.repairshop.saas.order.dto.RepairBookingDtos.*;
 import com.repairshop.saas.order.entity.CustomerNotification;
 import com.repairshop.saas.order.entity.CustomerOrder;
+import com.repairshop.saas.order.entity.PlatformTicket;
 import com.repairshop.saas.order.entity.RepairBooking;
 import com.repairshop.saas.order.entity.RepairBookingEvent;
 import com.repairshop.saas.order.entity.RepairBookingService;
@@ -39,6 +41,7 @@ public class RepairBookingController {
     private final RepairBookingEventRepository eventRepo;
     private final CustomerOrderRepository customerOrderRepo;
     private final com.repairshop.saas.order.repository.CustomerNotificationRepository notificationRepo;
+    private final com.repairshop.saas.order.repository.PlatformTicketRepository platformTicketRepo;
     private final ObjectMapper objectMapper;
 
     @PostMapping
@@ -228,6 +231,29 @@ public class RepairBookingController {
         return ResponseEntity.ok(toResponseWithChildren(b));
     }
 
+    // Customer marks the repair estimate as approved. Flips the customer-side
+    // repair_bookings.customer_approval ("DONE") and mirrors to the owner-side
+    // tickets.customer_approval (true) when the booking was shop-created.
+    @PostMapping("/{id}/customer-approval")
+    @Transactional
+    public ResponseEntity<RepairBookingResponse> customerApproval(HttpServletRequest req, @PathVariable UUID id) {
+        UUID userId = callerId(req);
+        RepairBooking b = bookingRepo.findById(id).orElseThrow(() -> new ResourceNotFoundException("Booking not found"));
+        if (!b.getCustomerUserId().equals(userId)) throw new ForbiddenException("Not your booking");
+        b.setCustomerApproval("DONE");
+        bookingRepo.save(b);
+        if (b.getTicketId() != null) {
+            platformTicketRepo.findById(b.getTicketId()).ifPresent(t -> {
+                t.setCustomerApproval(Boolean.TRUE);
+                platformTicketRepo.save(t);
+            });
+        }
+        eventRepo.save(RepairBookingEvent.builder()
+                .bookingId(b.getId()).status(b.getStatus())
+                .note("Customer approved repair").actor("USER").build());
+        return ResponseEntity.ok(toResponseWithChildren(b));
+    }
+
     @PostMapping("/{id}/cancel")
     @Transactional
     public ResponseEntity<RepairBookingResponse> cancel(HttpServletRequest req, @PathVariable UUID id) {
@@ -263,30 +289,89 @@ public class RepairBookingController {
     }
 
     private RepairBookingResponse toResponse(RepairBooking b) {
+        // Shop-entered ticket fields (photos, security, parts, approval, schedule, estimate)
+        // live on the ticket row; the booking row is populated by ticket-service's mirror
+        // when the shop saves the ticket. When the mirror hasn't yet run (or ran on an older
+        // code path), fall back to the linked ticket so the customer view always reflects
+        // what the shop entered.
+        PlatformTicket t = b.getTicketId() != null
+                ? platformTicketRepo.findById(b.getTicketId()).orElse(null)
+                : null;
+        Map<String, String> tPhotos = t != null ? parseDevicePhotos(t.getDevicePhotosJson()) : Map.of();
+        String tMissingParts = t != null ? formatMissingParts(t.getMissingPartsJson()) : null;
+        String tCustomerApproval = t != null && Boolean.TRUE.equals(t.getCustomerApproval()) ? "DONE" : null;
         return RepairBookingResponse.builder()
                 .id(b.getId()).bookingNumber(b.getBookingNumber())
                 .shopId(b.getShopId()).ticketId(b.getTicketId()).savedDeviceId(b.getSavedDeviceId())
                 .brandId(b.getBrandId()).modelId(b.getModelId())
                 .ramOptionId(b.getRamOptionId()).storageOptionId(b.getStorageOptionId())
                 .color(b.getColor()).serviceMode(b.getServiceMode())
-                .frontImageUrl(b.getFrontImageUrl()).backImageUrl(b.getBackImageUrl()).videoUrl(b.getVideoUrl())
-                .issueSummary(b.getIssueSummary())
-                .estimateAmount(b.getEstimateAmount()).finalAmount(b.getFinalAmount())
+                .frontImageUrl(coalesce(b.getFrontImageUrl(), tPhotos.get("front")))
+                .backImageUrl(coalesce(b.getBackImageUrl(), tPhotos.get("back")))
+                .videoUrl(coalesce(b.getVideoUrl(), tPhotos.get("video")))
+                .issueSummary(coalesce(b.getIssueSummary(), t != null ? t.getIssueDescription() : null))
+                .estimateAmount(b.getEstimateAmount() != null ? b.getEstimateAmount()
+                        : (t != null ? t.getEstimatedPrice() : null))
+                .finalAmount(b.getFinalAmount())
                 .status(b.getStatus())
                 .pickupAddressId(b.getPickupAddressId())
                 .pickupDate(b.getPickupDate())
                 .pickupSlotStart(b.getPickupSlotStart()).pickupSlotEnd(b.getPickupSlotEnd())
-                .estimatedReadyAt(b.getEstimatedReadyAt())
+                .estimatedReadyAt(b.getEstimatedReadyAt() != null ? b.getEstimatedReadyAt()
+                        : (t != null ? t.getEstimatedReadyAt() : null))
                 .estimatedDurationHours(b.getEstimatedDurationHours())
-                .estimatedDeliveryAt(b.getEstimatedDeliveryAt())
-                .customerApproval(b.getCustomerApproval())
-                .devicePin(b.getDevicePin())
-                .missingDamageParts(b.getMissingDamageParts())
+                .estimatedDeliveryAt(b.getEstimatedDeliveryAt() != null ? b.getEstimatedDeliveryAt()
+                        : (t != null ? t.getEstimatedDeliveryAt() : null))
+                .customerApproval(coalesce(b.getCustomerApproval(), tCustomerApproval))
+                .deviceSecurityType(t != null && !"NONE".equalsIgnoreCase(t.getDeviceSecurityType())
+                        ? t.getDeviceSecurityType() : null)
+                .devicePin(coalesce(b.getDevicePin(), t != null ? t.getDeviceSecurityValue() : null))
+                .missingDamageParts(coalesce(b.getMissingDamageParts(), tMissingParts))
                 .technicianName(b.getTechnicianName())
                 .technicianCode(b.getTechnicianCode())
                 .technicianPhotos(splitCsv(b.getTechnicianPhotos()))
                 .createdAt(b.getCreatedAt()).updatedAt(b.getUpdatedAt())
                 .build();
+    }
+
+    private static String coalesce(String a, String b) {
+        return (a != null && !a.isBlank()) ? a : b;
+    }
+
+    private Map<String, String> parseDevicePhotos(String json) {
+        if (json == null || json.isBlank()) return Map.of();
+        try {
+            Map<String, Object> raw = objectMapper.readValue(json, new TypeReference<Map<String, Object>>() {});
+            Map<String, String> out = new HashMap<>();
+            for (String k : new String[]{"front", "back", "video"}) {
+                Object v = raw.get(k);
+                if (v != null) out.put(k, v.toString());
+            }
+            return out;
+        } catch (Exception e) {
+            return Map.of();
+        }
+    }
+
+    private String formatMissingParts(String json) {
+        if (json == null || json.isBlank()) return null;
+        try {
+            List<Object> items = objectMapper.readValue(json, new TypeReference<List<Object>>() {});
+            if (items == null || items.isEmpty()) return null;
+            List<String> labels = new java.util.ArrayList<>();
+            for (Object it : items) {
+                if (it instanceof Map<?, ?> m) {
+                    Object label = m.get("label");
+                    if (label == null) label = m.get("name");
+                    if (label != null) labels.add(label.toString());
+                } else if (it != null) {
+                    labels.add(it.toString());
+                }
+            }
+            return labels.isEmpty() ? null : String.join(", ", labels);
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     private static List<String> splitCsv(String csv) {

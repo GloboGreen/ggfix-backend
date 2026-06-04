@@ -44,6 +44,12 @@ public class TicketResponse {
     @Schema(description = "Model ID")
     private UUID modelId;
 
+    @Schema(description = "RAM option ID")
+    private UUID ramOptionId;
+
+    @Schema(description = "Storage option ID")
+    private UUID storageOptionId;
+
     @Schema(description = "Color")
     private String color;
 

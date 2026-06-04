@@ -18,7 +18,6 @@ public class ShopUpsertRequest {
     private String name;
     private String slug;
     private String email;
-    private String phone;
     private String address;
     private String timezone;
 
@@ -36,7 +35,4 @@ public class ShopUpsertRequest {
     private String state;
     private String pincode;
     private BigDecimal rating;
-    private String hoursText;
-    private String heroImageUrl;
-    private String description;
 }

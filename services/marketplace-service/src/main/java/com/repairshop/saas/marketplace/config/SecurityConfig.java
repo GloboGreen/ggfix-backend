@@ -29,9 +29,10 @@ public class SecurityConfig {
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers("/swagger-ui/**", "/api-docs/**", "/v3/api-docs/**").permitAll()
                         .requestMatchers("/actuator/**").permitAll()
-                        // Public browsing of products
+                        // Public browsing of products + buy board
                         .requestMatchers(HttpMethod.GET, "/marketplace/products").permitAll()
                         .requestMatchers(HttpMethod.GET, "/marketplace/products/**").permitAll()
+                        .requestMatchers(HttpMethod.GET, "/marketplace/buy/**").permitAll()
                         // Customer area requires auth
                         .requestMatchers("/customer/**").authenticated()
                         // All other marketplace mutations require auth

@@ -18,8 +18,11 @@ import java.util.UUID;
 /**
  * Seeds sample tickets for E2E testing when the DB is empty.
  * Uses the same E2E_ADMIN_SHOP_ID as auth-service AdminSeeder. Assigns 2 tickets to E2E technician (technician / test).
+ *
+ * Disabled — the Bookings History screen must reflect only real database rows.
+ * Re-enable by restoring the @Component annotation below.
  */
-@Component
+// @Component
 @Profile("dev")
 @Order(3)
 @RequiredArgsConstructor

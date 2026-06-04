@@ -29,9 +29,6 @@ public class Shop {
     @Column(length = 255)
     private String email;
 
-    @Column(length = 50)
-    private String phone;
-
     @Column(columnDefinition = "TEXT")
     private String address;
 
@@ -58,15 +55,6 @@ public class Shop {
 
     @Column(precision = 3, scale = 1)
     private BigDecimal rating;
-
-    @Column(name = "hours_text", length = 255)
-    private String hoursText;
-
-    @Column(name = "hero_image_url", length = 500)
-    private String heroImageUrl;
-
-    @Column(columnDefinition = "TEXT")
-    private String description;
 
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;

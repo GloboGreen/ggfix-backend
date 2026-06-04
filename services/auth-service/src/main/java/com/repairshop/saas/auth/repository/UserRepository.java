@@ -16,9 +16,13 @@ public interface UserRepository extends JpaRepository<User, UUID> {
 
     Optional<User> findByEmail(String email);
 
+    Optional<User> findByPhone(String phone);
+
     boolean existsByShop_IdAndEmail(UUID shopId, String email);
 
     List<User> findByShop_IdAndRole(UUID shopId, String role);
 
     List<User> findByShop_IdOrderByEmailAsc(UUID shopId);
+
+    List<User> findByRoleOrderByCreatedAtDesc(String role);
 }

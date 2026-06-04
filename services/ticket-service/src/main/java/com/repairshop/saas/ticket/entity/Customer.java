@@ -9,7 +9,8 @@ import java.util.UUID;
 @Entity
 @Table(name = "customers", indexes = {
     @Index(name = "idx_customers_shop_id", columnList = "shop_id"),
-    @Index(name = "idx_customers_phone", columnList = "shop_id, phone")
+    @Index(name = "idx_customers_phone", columnList = "shop_id, phone"),
+    @Index(name = "idx_customers_shop_platform_user", columnList = "shop_id, platform_user_id")
 })
 @Getter
 @Setter
@@ -36,6 +37,9 @@ public class Customer {
 
     @Column(name = "address", columnDefinition = "TEXT")
     private String address;
+
+    @Column(name = "platform_user_id")
+    private UUID platformUserId;
 
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;

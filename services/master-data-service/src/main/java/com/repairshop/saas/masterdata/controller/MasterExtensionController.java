@@ -320,10 +320,13 @@ public class MasterExtensionController {
 
     @PostMapping("/colors")
     public ResponseEntity<MasterColor> createColor(@RequestBody ColorRequest req) {
+        int nextSort = colorRepo.findTopByOrderBySortOrderDesc()
+                .map(c -> nz(c.getSortOrder()) + 1)
+                .orElse(0);
         MasterColor e = MasterColor.builder()
                 .name(req.getName())
                 .hexCode(req.getHexCode())
-                .sortOrder(nz(req.getSortOrder()))
+                .sortOrder(nextSort)
                 .build();
         return ResponseEntity.ok(colorRepo.save(e));
     }
@@ -334,7 +337,6 @@ public class MasterExtensionController {
                 .map(e -> {
                     e.setName(req.getName());
                     e.setHexCode(req.getHexCode());
-                    if (req.getSortOrder() != null) e.setSortOrder(req.getSortOrder());
                     return ResponseEntity.ok(colorRepo.save(e));
                 })
                 .orElse(ResponseEntity.notFound().build());

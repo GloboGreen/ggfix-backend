@@ -24,7 +24,7 @@ public class MasterBrand {
     /**
      * Public URL or path to display brand logo/image in mobile app and admin UI.
      */
-    @Column(name = "image_url", length = 500)
+    @Column(name = "image_url", columnDefinition = "TEXT")
     private String imageUrl;
 
     /**

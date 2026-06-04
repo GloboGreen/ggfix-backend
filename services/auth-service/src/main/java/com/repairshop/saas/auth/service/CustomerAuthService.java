@@ -63,6 +63,11 @@ public class CustomerAuthService {
         if ((mobile == null || mobile.isBlank()) && (email == null || email.isBlank()))
             throw new BadRequestException("Either mobile or email is required");
 
+        boolean usingOtp = request.getOtp() != null && !request.getOtp().isBlank();
+        boolean usingPwd = request.getPassword() != null && !request.getPassword().isBlank();
+        if (!usingOtp && !usingPwd)
+            throw new BadRequestException("Either password or otp is required");
+
         CustomerUser user;
         if (mobile != null && !mobile.isBlank()) {
             user = customerUserRepository.findByMobile(mobile)
@@ -74,9 +79,15 @@ public class CustomerAuthService {
 
         if (!Boolean.TRUE.equals(user.getIsActive()))
             throw new UnauthorizedException("Account is disabled");
-        if (user.getPasswordHash() == null
-                || !passwordEncoder.matches(request.getPassword(), user.getPasswordHash()))
-            throw new UnauthorizedException("Invalid credentials");
+
+        if (usingOtp) {
+            if (user.getOtpCode() == null || !user.getOtpCode().equals(request.getOtp().trim()))
+                throw new UnauthorizedException("Invalid OTP");
+        } else {
+            if (user.getPasswordHash() == null
+                    || !passwordEncoder.matches(request.getPassword(), user.getPasswordHash()))
+                throw new UnauthorizedException("Invalid credentials");
+        }
 
         String token = jwtService.issueCustomerToken(user.getId(), CUSTOMER_ROLES);
         return toResponse(user, token);

@@ -26,6 +26,24 @@ public interface TicketRepository extends JpaRepository<Ticket, UUID> {
 
     Page<Ticket> findByAssignedTechnicianId(UUID assignedTechnicianId, Pageable pageable);
 
+    @Query("""
+            SELECT t FROM Ticket t
+            WHERE t.shopId = :shopId
+              AND (:status IS NULL OR t.status = :status)
+              AND (
+                LOWER(COALESCE(t.trackingId, '')) LIKE LOWER(CONCAT('%', :q, '%'))
+                OR LOWER(COALESCE(t.customerName, '')) LIKE LOWER(CONCAT('%', :q, '%'))
+                OR LOWER(COALESCE(t.customerPhone, '')) LIKE LOWER(CONCAT('%', :q, '%'))
+                OR LOWER(COALESCE(t.deviceDisplayName, '')) LIKE LOWER(CONCAT('%', :q, '%'))
+                OR LOWER(COALESCE(t.repairServicesSummary, '')) LIKE LOWER(CONCAT('%', :q, '%'))
+              )
+            """)
+    Page<Ticket> searchByShop(
+            @Param("shopId") UUID shopId,
+            @Param("status") String status,
+            @Param("q") String q,
+            Pageable pageable);
+
     boolean existsByShopIdAndTrackingId(UUID shopId, String trackingId);
 
     long countByShopId(UUID shopId);

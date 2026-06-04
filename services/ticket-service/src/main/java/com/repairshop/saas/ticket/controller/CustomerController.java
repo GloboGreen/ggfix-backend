@@ -1,5 +1,6 @@
 package com.repairshop.saas.ticket.controller;
 
+import com.repairshop.saas.ticket.dto.CustomerLinkRequest;
 import com.repairshop.saas.ticket.dto.CustomerRequest;
 import com.repairshop.saas.ticket.dto.CustomerResponse;
 import com.repairshop.saas.ticket.service.CustomerService;
@@ -14,6 +15,7 @@ import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
 import java.util.UUID;
+import org.springframework.http.ResponseEntity;
 
 @RestController
 @RequestMapping("/customers")
@@ -39,6 +41,18 @@ public class CustomerController {
         return customerService.search(shopId, q);
     }
 
+    @GetMapping("/lookup")
+    @Operation(summary = "Lookup a customer by exact mobile (this shop first, then platform). 204 if not found.")
+    public ResponseEntity<CustomerResponse> lookup(
+            @RequestParam("mobile") String mobile,
+            HttpServletRequest request) {
+        UUID shopId = shopIdFrom(request);
+        if (shopId == null) throw new IllegalStateException("Missing shop context");
+        return customerService.lookupByMobile(shopId, mobile)
+                .map(ResponseEntity::ok)
+                .orElseGet(() -> ResponseEntity.noContent().build());
+    }
+
     @PostMapping
     @ResponseStatus(HttpStatus.CREATED)
     @Operation(summary = "Create a new customer")
@@ -46,5 +60,13 @@ public class CustomerController {
         UUID shopId = shopIdFrom(request);
         if (shopId == null) throw new IllegalStateException("Missing shop context");
         return customerService.create(shopId, body);
+    }
+
+    @PostMapping("/link")
+    @Operation(summary = "Link a platform customer_users row to this shop, creating a shop-scoped customers row if needed (idempotent)")
+    public CustomerResponse link(@Valid @RequestBody CustomerLinkRequest body, HttpServletRequest request) {
+        UUID shopId = shopIdFrom(request);
+        if (shopId == null) throw new IllegalStateException("Missing shop context");
+        return customerService.linkPlatformUser(shopId, body.getPlatformUserId());
     }
 }

@@ -21,12 +21,9 @@ public class ShopSummaryResponse {
     private String slug;
     private String city;
     private String address;
-    private String phone;
     private BigDecimal latitude;
     private BigDecimal longitude;
     private BigDecimal rating;
-    private String heroImageUrl;
     private Double distanceKm;
-    private String hoursText;
     private Boolean isOpen;
 }

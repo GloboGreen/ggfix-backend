@@ -37,6 +37,9 @@ public class CustomerUser {
     @Column(name = "password_hash", length = 255)
     private String passwordHash;
 
+    @Column(name = "otp_code", length = 16)
+    private String otpCode;
+
     @Column(name = "is_active", nullable = false)
     private Boolean isActive = true;
 

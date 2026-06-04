@@ -28,9 +28,30 @@ public class CustomerResponse {
     @Schema(description = "Phone number")
     private String phone;
 
-    @Schema(description = "Address")
+    @Schema(description = "Address (legacy single-string; structured components below)")
     private String address;
+
+    @Schema(description = "Address line — door no / street")
+    private String addressLine;
+
+    @Schema(description = "Locality / area")
+    private String locality;
+
+    @Schema(description = "City / district")
+    private String city;
+
+    @Schema(description = "State")
+    private String state;
+
+    @Schema(description = "Pincode")
+    private String pincode;
 
     @Schema(description = "Created at")
     private Instant createdAt;
+
+    @Schema(description = "Source of this row: 'shop' (per-shop customers table) or 'platform' (customer_users platform-wide table)")
+    private String source;
+
+    @Schema(description = "Platform customer_users.id when this row comes from or is linked to a platform customer; null otherwise")
+    private UUID platformUserId;
 }

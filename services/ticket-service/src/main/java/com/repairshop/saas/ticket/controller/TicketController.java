@@ -56,6 +56,7 @@ public class TicketController {
     @Operation(summary = "List tickets (paginated). Use assignedToMe=true for technician's assigned tickets.")
     public Page<TicketResponse> list(
             @RequestParam(required = false) String status,
+            @RequestParam(required = false) String q,
             @RequestParam(required = false, defaultValue = "false") boolean assignedToMe,
             Pageable pageable,
             HttpServletRequest request) {
@@ -66,7 +67,7 @@ public class TicketController {
         }
         UUID shopId = shopIdFrom(request);
         if (shopId == null) throw new IllegalStateException("Missing shop context");
-        return ticketService.listByShop(shopId, status, pageable);
+        return ticketService.listByShop(shopId, status, q, pageable);
     }
 
     @PostMapping

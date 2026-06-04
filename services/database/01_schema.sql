@@ -146,6 +146,8 @@ CREATE TABLE tickets (
     id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     shop_id             UUID NOT NULL REFERENCES shops(id) ON DELETE CASCADE,
     customer_id         UUID NOT NULL REFERENCES customers(id) ON DELETE RESTRICT,
+    customer_name       VARCHAR(200),
+    customer_phone      VARCHAR(30),
     assigned_technician_id UUID REFERENCES technicians(id) ON DELETE SET NULL,
     tracking_id         VARCHAR(50) NOT NULL,
     brand_id            UUID REFERENCES master_brands(id) ON DELETE SET NULL,
@@ -176,6 +178,7 @@ CREATE TABLE tickets (
 
 CREATE INDEX idx_tickets_shop_id ON tickets(shop_id);
 CREATE INDEX idx_tickets_customer_id ON tickets(customer_id);
+CREATE INDEX idx_tickets_customer_phone ON tickets(shop_id, customer_phone);
 CREATE INDEX idx_tickets_status ON tickets(shop_id, status);
 CREATE INDEX idx_tickets_tracking_id ON tickets(shop_id, tracking_id);
 CREATE INDEX idx_tickets_created_at ON tickets(shop_id, created_at DESC);

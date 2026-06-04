@@ -15,10 +15,12 @@ app:
   jwt:
     secret: ${JWT_SECRET:your-256-bit-secret-key-for-repair-shop-saas-jwt-signing}
   cloudinary:
-    # Set these env vars to upload to Cloudinary. If any of the three is blank,
-    # /media/upload falls back to returning an inline base64 data URI so the
-    # admin still works end-to-end without external creds.
-    cloud-name: ${CLOUDINARY_CLOUD_NAME:}
-    api-key: ${CLOUDINARY_API_KEY:}
-    api-secret: ${CLOUDINARY_API_SECRET:}
-    folder: ${CLOUDINARY_FOLDER:ggfix/master}
+    # Defaults below are the dev/team Cloudinary account so /media/upload
+    # works out-of-the-box. Override via env vars in non-local environments.
+    # If any of cloud-name / api-key / api-secret is blank, MediaController
+    # falls back to inline base64 data URIs.
+    # WARNING: rotate the api-secret in the Cloudinary dashboard if it leaks.
+    cloud-name: ${CLOUDINARY_CLOUD_NAME:dg6c0g4gi}
+    api-key: ${CLOUDINARY_API_KEY:694635395288588}
+    api-secret: ${CLOUDINARY_API_SECRET:geEEuXbhDF5Wy0T8RuOTM8IpXh8}
+    folder: ${CLOUDINARY_FOLDER:ggifx}

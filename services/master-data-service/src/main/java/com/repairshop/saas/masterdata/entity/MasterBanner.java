@@ -21,7 +21,7 @@ public class MasterBanner {
     @Column(length = 255)
     private String title;
 
-    @Column(name = "image_url", length = 500)
+    @Column(name = "image_url", columnDefinition = "TEXT")
     private String imageUrl;
 
     @Column(name = "image_base64", columnDefinition = "TEXT")

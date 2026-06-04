@@ -17,7 +17,6 @@ import java.util.List;
 @JsonInclude(JsonInclude.Include.NON_NULL)
 public class ShopDetailsResponse extends ShopSummaryResponse {
 
-    private String description;
     private String email;
     private String state;
     private String pincode;

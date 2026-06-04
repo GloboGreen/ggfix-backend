@@ -6,5 +6,4 @@ import lombok.Data;
 public class ColorRequest {
     private String name;
     private String hexCode;
-    private Integer sortOrder;
 }

@@ -80,6 +80,7 @@ public class RepairBookingDtos {
         private Integer estimatedDurationHours;
         private Instant estimatedDeliveryAt;
         private String customerApproval;
+        private String deviceSecurityType;
         private String devicePin;
         private String missingDamageParts;
         private String technicianName;

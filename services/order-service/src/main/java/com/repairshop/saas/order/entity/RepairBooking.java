@@ -18,6 +18,7 @@ public class RepairBooking {
     @Column(name = "customer_user_id", nullable = false) private UUID customerUserId;
     @Column(name = "shop_id") private UUID shopId;
     @Column(name = "ticket_id") private UUID ticketId;
+    @Column(name = "assigned_technician_id") private UUID assignedTechnicianId;
     @Column(name = "saved_device_id") private UUID savedDeviceId;
     @Column(name = "brand_id") private UUID brandId;
     @Column(name = "model_id") private UUID modelId;

@@ -138,7 +138,6 @@ public class ShopDirectoryController {
                 .name(req.getName())
                 .slug(req.getSlug())
                 .email(req.getEmail())
-                .phone(req.getPhone())
                 .address(req.getAddress())
                 .timezone(req.getTimezone())
                 .isActive(req.getIsActive() == null ? Boolean.TRUE : req.getIsActive())
@@ -148,9 +147,6 @@ public class ShopDirectoryController {
                 .state(req.getState())
                 .pincode(req.getPincode())
                 .rating(req.getRating())
-                .hoursText(req.getHoursText())
-                .heroImageUrl(req.getHeroImageUrl())
-                .description(req.getDescription())
                 .build();
         Shop saved = shopRepository.save(shop);
         return ResponseEntity.ok(toDetails(saved));
@@ -164,7 +160,6 @@ public class ShopDirectoryController {
         if (req.getName() != null) shop.setName(req.getName());
         if (req.getSlug() != null) shop.setSlug(req.getSlug());
         if (req.getEmail() != null) shop.setEmail(req.getEmail());
-        if (req.getPhone() != null) shop.setPhone(req.getPhone());
         if (req.getAddress() != null) shop.setAddress(req.getAddress());
         if (req.getTimezone() != null) shop.setTimezone(req.getTimezone());
         if (req.getIsActive() != null) shop.setIsActive(req.getIsActive());
@@ -174,9 +169,6 @@ public class ShopDirectoryController {
         if (req.getState() != null) shop.setState(req.getState());
         if (req.getPincode() != null) shop.setPincode(req.getPincode());
         if (req.getRating() != null) shop.setRating(req.getRating());
-        if (req.getHoursText() != null) shop.setHoursText(req.getHoursText());
-        if (req.getHeroImageUrl() != null) shop.setHeroImageUrl(req.getHeroImageUrl());
-        if (req.getDescription() != null) shop.setDescription(req.getDescription());
         return ResponseEntity.ok(toDetails(shopRepository.save(shop)));
     }
 
@@ -287,14 +279,11 @@ public class ShopDirectoryController {
                 .slug(s.getSlug())
                 .city(s.getCity())
                 .address(s.getAddress())
-                .phone(s.getPhone())
                 .latitude(s.getLatitude())
                 .longitude(s.getLongitude())
                 .rating(s.getRating())
-                .heroImageUrl(s.getHeroImageUrl())
                 .distanceKm(distanceKm)
-                .hoursText(s.getHoursText())
-                .isOpen(Boolean.TRUE) // simple default; refine with real logic when hours model is structured
+                .isOpen(Boolean.TRUE)
                 .build();
     }
 
@@ -315,14 +304,10 @@ public class ShopDirectoryController {
                 .slug(s.getSlug())
                 .city(s.getCity())
                 .address(s.getAddress())
-                .phone(s.getPhone())
                 .latitude(s.getLatitude())
                 .longitude(s.getLongitude())
                 .rating(s.getRating())
-                .heroImageUrl(s.getHeroImageUrl())
-                .hoursText(s.getHoursText())
                 .isOpen(Boolean.TRUE)
-                .description(s.getDescription())
                 .email(s.getEmail())
                 .state(s.getState())
                 .pincode(s.getPincode())

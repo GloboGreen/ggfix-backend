@@ -27,7 +27,7 @@ public class MasterSupportContact {
     @Column(length = 50)
     private String phone;
 
-    @Column(name = "image_url", length = 500)
+    @Column(name = "image_url", columnDefinition = "TEXT")
     private String imageUrl;
 
     @Column(name = "sort_order", nullable = false)

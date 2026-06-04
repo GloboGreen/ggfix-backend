@@ -12,12 +12,14 @@ import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
- * Seeds a default customer-app account so the mobile Customer login works
- * out of the box during dev (H2 in-memory profile).
+ * Seeds the configured customer-app account so the mobile Customer login
+ * works out of the box during dev. Idempotent — upserts password & OTP on
+ * each run so credentials stay in sync with this file.
  *
  * Login on the mobile app's Customer tab:
- *   Mobile:   9876543210
- *   Password: test1234
+ *   Mobile:   8939615914
+ *   Password: nandha56@
+ *   OTP:      562000
  */
 @Component
 @Profile("dev")
@@ -26,10 +28,10 @@ import org.springframework.transaction.annotation.Transactional;
 @Slf4j
 public class CustomerSeeder implements CommandLineRunner {
 
-    public static final String DEMO_MOBILE = "9876543210";
-    public static final String DEMO_PASSWORD = "test1234";
-    public static final String DEMO_EMAIL = "demo.customer@globogreen.local";
-    public static final String DEMO_NAME = "Demo Customer";
+    public static final String SEED_MOBILE   = "8939615914";
+    public static final String SEED_PASSWORD = "nandha56@";
+    public static final String SEED_OTP      = "562000";
+    public static final String SEED_NAME     = "Nandha";
 
     private final CustomerUserRepository customerUserRepository;
     private final PasswordEncoder passwordEncoder;
@@ -37,21 +39,39 @@ public class CustomerSeeder implements CommandLineRunner {
     @Override
     @Transactional
     public void run(String... args) {
-        if (customerUserRepository.existsByMobile(DEMO_MOBILE)) {
-            log.info("CustomerSeeder: demo customer already exists (mobile={}).", DEMO_MOBILE);
-            return;
-        }
-
-        CustomerUser user = CustomerUser.builder()
-                .fullName(DEMO_NAME)
-                .email(DEMO_EMAIL)
-                .mobile(DEMO_MOBILE)
-                .passwordHash(passwordEncoder.encode(DEMO_PASSWORD))
-                .isActive(true)
-                .build();
-        customerUserRepository.save(user);
-
-        log.info("CustomerSeeder: created demo customer (mobile={}, password={}).",
-                DEMO_MOBILE, DEMO_PASSWORD);
+        customerUserRepository.findByMobile(SEED_MOBILE).ifPresentOrElse(
+                existing -> {
+                    boolean dirty = false;
+                    if (existing.getPasswordHash() == null
+                            || !passwordEncoder.matches(SEED_PASSWORD, existing.getPasswordHash())) {
+                        existing.setPasswordHash(passwordEncoder.encode(SEED_PASSWORD));
+                        dirty = true;
+                    }
+                    if (existing.getOtpCode() == null || !SEED_OTP.equals(existing.getOtpCode())) {
+                        existing.setOtpCode(SEED_OTP);
+                        dirty = true;
+                    }
+                    if (!Boolean.TRUE.equals(existing.getIsActive())) {
+                        existing.setIsActive(true);
+                        dirty = true;
+                    }
+                    if (dirty) {
+                        customerUserRepository.save(existing);
+                        log.info("CustomerSeeder: refreshed credentials for {}", SEED_MOBILE);
+                    }
+                },
+                () -> {
+                    CustomerUser user = CustomerUser.builder()
+                            .fullName(SEED_NAME)
+                            .mobile(SEED_MOBILE)
+                            .passwordHash(passwordEncoder.encode(SEED_PASSWORD))
+                            .otpCode(SEED_OTP)
+                            .isActive(true)
+                            .build();
+                    customerUserRepository.save(user);
+                    log.info("CustomerSeeder: created customer (mobile={}, otp={}).",
+                            SEED_MOBILE, SEED_OTP);
+                }
+        );
     }
 }

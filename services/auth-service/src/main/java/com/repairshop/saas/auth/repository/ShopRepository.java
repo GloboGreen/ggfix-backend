@@ -14,4 +14,9 @@ public interface ShopRepository extends JpaRepository<Shop, UUID> {
     Optional<Shop> findBySlug(String slug);
 
     boolean existsBySlug(String slug);
+
+    java.util.List<Shop> findByOwnerUserIdOrderByCreatedAtAsc(UUID ownerUserId);
+
+    /** Pickup-enabled shops with usable coords — filtered by distance in the service layer. */
+    java.util.List<Shop> findByPickupEnabledTrueAndLatitudeNotNullAndLongitudeNotNull();
 }

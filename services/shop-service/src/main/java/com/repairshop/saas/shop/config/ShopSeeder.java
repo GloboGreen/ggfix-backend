@@ -127,7 +127,6 @@ public class ShopSeeder implements CommandLineRunner {
                 .name(name)
                 .slug(slug)
                 .email(email)
-                .phone(phone)
                 .address(address)
                 .timezone("Asia/Kolkata")
                 .isActive(Boolean.TRUE)
@@ -137,9 +136,6 @@ public class ShopSeeder implements CommandLineRunner {
                 .state(state)
                 .pincode(pincode)
                 .rating(rating)
-                .hoursText(DEFAULT_HOURS)
-                .heroImageUrl(heroImageUrl)
-                .description(description)
                 .build();
         Shop saved = shopRepository.save(shop);
         UUID shopId = saved.getId();

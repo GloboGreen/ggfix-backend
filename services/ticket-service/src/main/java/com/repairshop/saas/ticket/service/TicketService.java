@@ -26,6 +26,7 @@ public class TicketService {
 
     private final TicketRepository ticketRepository;
     private final TechnicianRepository technicianRepository;
+    private final CustomerOrderMirrorService customerOrderMirrorService;
 
     private static final String TRACKING_PREFIX = "CSPEN";
 
@@ -37,10 +38,14 @@ public class TicketService {
     }
 
     @Transactional(readOnly = true)
-    public Page<TicketResponse> listByShop(UUID shopId, String status, Pageable pageable) {
-        Page<Ticket> page = status != null && !status.isBlank()
-                ? ticketRepository.findByShopIdAndStatus(shopId, status, pageable)
-                : ticketRepository.findByShopId(shopId, pageable);
+    public Page<TicketResponse> listByShop(UUID shopId, String status, String q, Pageable pageable) {
+        String normalizedStatus = status != null && !status.isBlank() ? status : null;
+        String normalizedQuery = q != null && !q.isBlank() ? q.trim() : null;
+        Page<Ticket> page = normalizedQuery != null
+                ? ticketRepository.searchByShop(shopId, normalizedStatus, normalizedQuery, pageable)
+                : normalizedStatus != null
+                        ? ticketRepository.findByShopIdAndStatus(shopId, normalizedStatus, pageable)
+                        : ticketRepository.findByShopId(shopId, pageable);
         return page.map(this::toResponse);
     }
 
@@ -104,6 +109,7 @@ public class TicketService {
                 .status("CREATED")
                 .build();
         ticket = ticketRepository.save(ticket);
+        customerOrderMirrorService.mirrorOnUpsert(ticket);
         return toResponse(ticket);
     }
 
@@ -134,6 +140,7 @@ public class TicketService {
         ticket.setEstimatedReadyAt(request.getEstimatedReadyAt());
         ticket.setEstimatedDeliveryAt(request.getEstimatedDeliveryAt());
         ticket = ticketRepository.save(ticket);
+        customerOrderMirrorService.mirrorOnUpsert(ticket);
         return toResponse(ticket);
     }
 
@@ -142,7 +149,8 @@ public class TicketService {
         Ticket ticket = ticketRepository.findByShopIdAndId(shopId, id)
                 .orElseThrow(() -> new ResourceNotFoundException("Ticket not found: " + id));
         ticket.setStatus(status);
-        ticketRepository.save(ticket);
+        ticket = ticketRepository.save(ticket);
+        customerOrderMirrorService.mirrorOnUpsert(ticket);
     }
 
     /**
@@ -182,6 +190,7 @@ public class TicketService {
         }
 
         ticket = ticketRepository.save(ticket);
+        customerOrderMirrorService.mirrorOnUpsert(ticket);
         return toResponse(ticket);
     }
 
@@ -201,6 +210,8 @@ public class TicketService {
                 .trackingId(t.getTrackingId())
                 .brandId(t.getBrandId())
                 .modelId(t.getModelId())
+                .ramOptionId(t.getRamOptionId())
+                .storageOptionId(t.getStorageOptionId())
                 .color(t.getColor())
                 .status(t.getStatus())
                 .estimatedPrice(t.getEstimatedPrice())

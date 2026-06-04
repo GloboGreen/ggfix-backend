@@ -162,6 +162,104 @@ public class SellOrderController {
         return ResponseEntity.ok(toResponseWithQuotes(s));
     }
 
+    // Customer-side edit. Allowed only while the sell order is still
+    // "editable" (no shop has committed to a quotation yet). Replaces device
+    // fields and the child rows (screening answers / conditions / issues /
+    // accessories) when those arrays are present in the body.
+    private static final java.util.Set<String> EDITABLE_STATUSES = java.util.Set.of(
+            "PENDING", "AWAITING_QUOTATION", "DRAFT"
+    );
+
+    @PutMapping("/{id}")
+    @Transactional
+    public ResponseEntity<SellOrderResponse> update(HttpServletRequest req,
+                                                    @PathVariable UUID id,
+                                                    @RequestBody SellOrderRequest body) {
+        UUID userId = callerId(req);
+        SellOrder s = sellRepo.findById(id).orElseThrow(() -> new ResourceNotFoundException("Sell order not found"));
+        if (!s.getCustomerUserId().equals(userId)) throw new ForbiddenException("Not your sell order");
+        String statusUpper = s.getStatus() == null ? "" : s.getStatus().toUpperCase();
+        if (!EDITABLE_STATUSES.contains(statusUpper)) {
+            throw new ForbiddenException("This sell order can no longer be edited (status: " + statusUpper + ")");
+        }
+
+        // Replace only the fields the caller actually sent. UUID fields are
+        // applied unconditionally when non-null; string fields treat empty
+        // string as a clear (so the customer can wipe IMEI/color).
+        if (body.getBrandId() != null) s.setBrandId(body.getBrandId());
+        if (body.getModelId() != null) s.setModelId(body.getModelId());
+        if (body.getRamOptionId() != null) s.setRamOptionId(body.getRamOptionId());
+        if (body.getStorageOptionId() != null) s.setStorageOptionId(body.getStorageOptionId());
+        if (body.getAddressId() != null) s.setAddressId(body.getAddressId());
+        if (body.getColor() != null) s.setColor(body.getColor().isBlank() ? null : body.getColor());
+        if (body.getImei() != null) s.setImei(body.getImei().isBlank() ? null : body.getImei());
+        if (body.getWorkingCondition() != null) s.setWorkingCondition(body.getWorkingCondition());
+        if (body.getWarrantyCode() != null) s.setWarrantyCode(body.getWarrantyCode());
+        if (body.getPickupDate() != null) s.setPickupDate(body.getPickupDate());
+        if (body.getPickupSlotStart() != null) s.setPickupSlotStart(body.getPickupSlotStart());
+        if (body.getPickupSlotEnd() != null) s.setPickupSlotEnd(body.getPickupSlotEnd());
+
+        ImageBundle imgs = body.getImages();
+        if (imgs != null) {
+            if (imgs.getFront() != null) s.setFrontImageUrl(imgs.getFront().isBlank() ? null : imgs.getFront());
+            if (imgs.getBack() != null) s.setBackImageUrl(imgs.getBack().isBlank() ? null : imgs.getBack());
+            if (imgs.getSide() != null) s.setSideImageUrl(imgs.getSide().isBlank() ? null : imgs.getSide());
+            if (imgs.getCamera() != null) s.setCameraImageUrl(imgs.getCamera().isBlank() ? null : imgs.getCamera());
+            if (imgs.getOther() != null) s.setOtherImageUrl(imgs.getOther().isBlank() ? null : imgs.getOther());
+        }
+
+        sellRepo.save(s);
+
+        // Replace child collections only when the caller explicitly sent them.
+        if (body.getScreeningAnswers() != null) {
+            answerRepo.deleteBySellOrderId(s.getId());
+            for (ScreeningAnswerRow a : body.getScreeningAnswers()) {
+                answerRepo.save(SellOrderScreeningAnswer.builder()
+                        .sellOrderId(s.getId()).questionId(a.getQuestionId())
+                        .question(a.getQuestion()).answer(a.getAnswer()).build());
+            }
+        }
+        if (body.getConditions() != null) {
+            conditionRepo.deleteBySellOrderId(s.getId());
+            for (ConditionRow c : body.getConditions()) {
+                conditionRepo.save(SellOrderCondition.builder()
+                        .sellOrderId(s.getId()).groupCode(c.getGroupCode()).groupName(c.getGroupName())
+                        .optionId(c.getOptionId()).optionLabel(c.getOptionLabel()).build());
+            }
+        }
+        if (body.getIssues() != null) {
+            issueRepo.deleteBySellOrderId(s.getId());
+            for (IssueRow i : body.getIssues()) {
+                issueRepo.save(SellOrderIssue.builder()
+                        .sellOrderId(s.getId()).issueId(i.getIssueId()).issueCode(i.getIssueCode()).build());
+            }
+        }
+        if (body.getAccessories() != null) {
+            accRepo.deleteBySellOrderId(s.getId());
+            for (AccessoryRow a : body.getAccessories()) {
+                accRepo.save(SellOrderAccessory.builder()
+                        .sellOrderId(s.getId()).accessoryId(a.getAccessoryId())
+                        .accessoryCode(a.getAccessoryCode()).label(a.getLabel()).build());
+            }
+        }
+
+        // Keep the matching customer_orders row consistent if anything that's
+        // surfaced there changed (we only echo title-side fields here).
+        customerOrderRepo.findByOrderNumber(s.getSellNumber()).ifPresent(co -> {
+            Map<String, Object> payload = new HashMap<>();
+            payload.put("title", "Sell Device");
+            payload.put("sellOrderId", s.getId());
+            payload.put("brandId", s.getBrandId());
+            payload.put("modelId", s.getModelId());
+            payload.put("workingCondition", s.getWorkingCondition());
+            try { co.setPayloadJson(objectMapper.writeValueAsString(payload)); }
+            catch (Exception ignored) {}
+            customerOrderRepo.save(co);
+        });
+
+        return ResponseEntity.ok(toDetails(s));
+    }
+
     @PostMapping("/{id}/cancel")
     @Transactional
     public ResponseEntity<SellOrderResponse> cancel(HttpServletRequest req, @PathVariable UUID id) {

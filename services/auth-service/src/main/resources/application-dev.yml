@@ -1,16 +1,17 @@
+# dev profile — points at the local Postgres set up via database/schema/*.sql.
 # Run with: spring.profiles.active=dev (or -Dspring.profiles.active=dev)
-# Uses H2 in-memory DB so you can run without PostgreSQL.
+# Override creds with DB_USER / DB_PASSWORD env vars if not using postgres/root locally.
 spring:
   datasource:
-    url: jdbc:h2:mem:repairshop;DB_CLOSE_DELAY=-1
-    username: sa
-    password:
-    driver-class-name: org.h2.Driver
-  h2:
-    console:
-      enabled: true
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:repairshop}
+    username: ${DB_USER:postgres}
+    password: ${DB_PASSWORD:root}
+    driver-class-name: org.postgresql.Driver
   jpa:
     hibernate:
-      ddl-auto: update
-    database-platform: org.hibernate.dialect.H2Dialect
+      ddl-auto: validate
     show-sql: false
+    properties:
+      hibernate:
+        default_schema: public
+        dialect: org.hibernate.dialect.PostgreSQLDialect
