@@ -115,6 +115,44 @@ public class PickupOrderService {
         return toResponseWithEvents(order);
     }
 
+    @Transactional(readOnly = true)
+    public PickupOrderResponse getByShop(UUID shopId, UUID id) {
+        CustomerPickupOrder order = pickupOrderRepository.findById(id)
+                .orElseThrow(() -> new ResourceNotFoundException("Pickup order not found: " + id));
+        if (order.getShopId() == null || !order.getShopId().equals(shopId)) {
+            throw new ForbiddenException("This pickup order does not belong to your shop");
+        }
+        return toResponseWithEvents(order);
+    }
+
+    @Transactional(readOnly = true)
+    public List<PickupOrderResponse> listForShop(UUID shopId, String statusFilter) {
+        List<CustomerPickupOrder> orders;
+        if (statusFilter == null || statusFilter.isBlank()) {
+            orders = pickupOrderRepository.findByShopIdOrderByCreatedAtDesc(shopId);
+        } else {
+            String upper = statusFilter.toUpperCase();
+            switch (upper) {
+                case "ACTIVE" -> {
+                    List<CustomerPickupOrder> all = pickupOrderRepository.findByShopIdOrderByCreatedAtDesc(shopId);
+                    orders = all.stream()
+                            .filter(o -> {
+                                String s = o.getStatus() == null ? "" : o.getStatus().toUpperCase();
+                                return !s.equals("COMPLETED") && !s.equals("CANCELLED");
+                            })
+                            .toList();
+                }
+                case "COMPLETED" -> orders = pickupOrderRepository
+                        .findByShopIdAndStatusInOrderByCreatedAtDesc(shopId, List.of("COMPLETED"));
+                case "CANCELLED" -> orders = pickupOrderRepository
+                        .findByShopIdAndStatusInOrderByCreatedAtDesc(shopId, List.of("CANCELLED"));
+                default -> orders = pickupOrderRepository
+                        .findByShopIdAndStatusInOrderByCreatedAtDesc(shopId, List.of(upper));
+            }
+        }
+        return orders.stream().map(this::toResponse).toList();
+    }
+
     @Transactional
     public PickupOrderResponse updateStatus(UUID userId, UUID id, String status) {
         if (status == null || status.isBlank()) {
@@ -188,6 +226,7 @@ public class PickupOrderService {
         return PickupOrderResponse.builder()
                 .id(o.getId())
                 .orderNumber(o.getOrderNumber())
+                .customerUserId(o.getCustomerUserId())
                 .shopId(o.getShopId())
                 .ticketId(o.getTicketId())
                 .addressId(o.getAddressId())

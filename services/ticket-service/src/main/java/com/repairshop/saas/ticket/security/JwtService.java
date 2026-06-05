@@ -33,7 +33,8 @@ public class JwtService {
     }
 
     public UUID getShopId(String token) {
-        return UUID.fromString(parseClaims(token).get("shopId", String.class));
+        String raw = parseClaims(token).get("shopId", String.class);
+        return raw != null && !raw.isBlank() ? UUID.fromString(raw) : null;
     }
 
     @SuppressWarnings("unchecked")

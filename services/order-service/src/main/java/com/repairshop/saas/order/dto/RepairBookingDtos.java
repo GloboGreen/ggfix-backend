@@ -56,6 +56,7 @@ public class RepairBookingDtos {
     public static class RepairBookingResponse {
         private UUID id;
         private String bookingNumber;
+        private UUID customerUserId;
         private UUID shopId;
         private UUID ticketId;
         private UUID savedDeviceId;
@@ -86,10 +87,21 @@ public class RepairBookingDtos {
         private String technicianName;
         private String technicianCode;
         private List<String> technicianPhotos;
+        private UUID assignedPickupPersonId;
+        private String pickupPersonName;
+        private String pickupPersonPhone;
         private List<ServiceRow> services;
         private List<RepairBookingEventResp> events;
         private Instant createdAt;
         private Instant updatedAt;
+        // Resolved customer + pickup address fields. Populated by shop-side
+        // endpoints so the owner sees who placed the booking and where to go.
+        private String customerName;
+        private String customerMobile;
+        private String pickupAddressText;
+        private String pickupAddressPincode;
+        private String pickupAddressMobile;
+        private String pickupAddressLabel;
     }
 
     @Data @NoArgsConstructor @AllArgsConstructor @Builder
@@ -105,5 +117,16 @@ public class RepairBookingDtos {
     public static class ShopStatusRequest {
         private String status;
         private String note;
+    }
+
+    // Shop owner assigns (or reassigns) a pickup person to a booking. The id
+    // is the technicians.id of the chosen staff member; name + phone are
+    // denormalized onto repair_bookings so the customer screen does not need
+    // to cross-service lookup.
+    @Data @NoArgsConstructor @AllArgsConstructor @Builder
+    public static class AssignPickupPersonRequest {
+        private UUID pickupPersonId;
+        private String pickupPersonName;
+        private String pickupPersonPhone;
     }
 }

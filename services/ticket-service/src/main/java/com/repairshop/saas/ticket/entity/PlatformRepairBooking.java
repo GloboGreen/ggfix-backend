@@ -23,7 +23,6 @@ public class PlatformRepairBooking {
     @Column(name = "customer_user_id", nullable = false) private UUID customerUserId;
     @Column(name = "shop_id") private UUID shopId;
     @Column(name = "ticket_id") private UUID ticketId;
-    @Column(name = "assigned_technician_id") private UUID assignedTechnicianId;
     @Column(name = "brand_id") private UUID brandId;
     @Column(name = "model_id") private UUID modelId;
     @Column(name = "ram_option_id") private UUID ramOptionId;
@@ -39,6 +38,8 @@ public class PlatformRepairBooking {
     @Column(name = "customer_approval", length = 20) private String customerApproval;
     @Column(name = "device_pin", length = 20) private String devicePin;
     @Column(name = "missing_damage_parts", columnDefinition = "TEXT") private String missingDamageParts;
+    @Column(name = "technician_name", length = 120) private String technicianName;
+    @Column(name = "technician_code", length = 40) private String technicianCode;
     @Column(name = "front_image_url", length = 500) private String frontImageUrl;
     @Column(name = "back_image_url", length = 500) private String backImageUrl;
     @Column(name = "video_url", length = 500) private String videoUrl;

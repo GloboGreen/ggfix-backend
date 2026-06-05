@@ -17,7 +17,9 @@ import com.repairshop.saas.order.repository.RepairBookingRepository;
 import com.repairshop.saas.order.repository.RepairBookingServiceRepository;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.*;
 
@@ -31,6 +33,7 @@ import java.util.UUID;
 @RestController
 @RequestMapping("/repair-bookings")
 @RequiredArgsConstructor
+@Slf4j
 public class RepairBookingController {
 
     private static final SecureRandom RANDOM = new SecureRandom();
@@ -42,12 +45,16 @@ public class RepairBookingController {
     private final CustomerOrderRepository customerOrderRepo;
     private final com.repairshop.saas.order.repository.CustomerNotificationRepository notificationRepo;
     private final com.repairshop.saas.order.repository.PlatformTicketRepository platformTicketRepo;
+    // Direct JDBC for customer + address enrichment — bypasses Hibernate entity
+    // scanning so this works regardless of whether new @Entity classes are
+    // picked up by the JPA bootstrap.
+    private final JdbcTemplate jdbc;
     private final ObjectMapper objectMapper;
 
     @PostMapping
     @Transactional
     public ResponseEntity<RepairBookingResponse> create(HttpServletRequest req, @RequestBody RepairBookingRequest body) {
-        UUID userId = callerId(req);
+        UUID userId = customerCallerId(req);
         String bookingNumber = uniqueBookingNumber();
         BigDecimal estimateAmount = body.getServices() == null ? null :
                 body.getServices().stream()
@@ -146,7 +153,7 @@ public class RepairBookingController {
 
     @GetMapping
     public ResponseEntity<List<RepairBookingResponse>> list(HttpServletRequest req, @RequestParam(value = "status", required = false) String status) {
-        UUID userId = callerId(req);
+        UUID userId = customerCallerId(req);
         List<RepairBooking> list = status == null || status.isBlank()
                 ? bookingRepo.findByCustomerUserIdOrderByCreatedAtDesc(userId)
                 : bookingRepo.findByCustomerUserIdAndStatusOrderByCreatedAtDesc(userId, status.toUpperCase());
@@ -155,18 +162,18 @@ public class RepairBookingController {
 
     @GetMapping("/{id}")
     public ResponseEntity<RepairBookingResponse> get(HttpServletRequest req, @PathVariable UUID id) {
-        UUID userId = callerId(req);
+        UUID userId = customerCallerId(req);
         RepairBooking b = bookingRepo.findById(id).orElseThrow(() -> new ResourceNotFoundException("Booking not found"));
-        if (!b.getCustomerUserId().equals(userId)) throw new ForbiddenException("Not your booking");
+        assertCustomerOwnsBooking(b, userId);
         return ResponseEntity.ok(toResponseWithChildren(b));
     }
 
     @PatchMapping("/{id}/status")
     @Transactional
     public ResponseEntity<RepairBookingResponse> setStatus(HttpServletRequest req, @PathVariable UUID id, @RequestParam String status) {
-        UUID userId = callerId(req);
+        UUID userId = customerCallerId(req);
         RepairBooking b = bookingRepo.findById(id).orElseThrow(() -> new ResourceNotFoundException("Booking not found"));
-        if (!b.getCustomerUserId().equals(userId)) throw new ForbiddenException("Not your booking");
+        assertCustomerOwnsBooking(b, userId);
         b.setStatus(status.toUpperCase());
         bookingRepo.save(b);
         eventRepo.save(RepairBookingEvent.builder()
@@ -181,7 +188,112 @@ public class RepairBookingController {
     public ResponseEntity<List<RepairBookingResponse>> listForShop(HttpServletRequest req) {
         UUID shopId = shopCallerId(req);
         List<RepairBooking> list = bookingRepo.findByShopIdOrderByCreatedAtDesc(shopId);
-        return ResponseEntity.ok(list.stream().map(this::toResponseWithChildren).toList());
+        log.info("listForShop: shopId={} bookings={}", shopId, list.size());
+        return ResponseEntity.ok(list.stream().map(b -> enrichCustomerFields(toResponseWithChildren(b), b)).toList());
+    }
+
+    // Single booking lookup scoped to the caller's shop (owner pickup detail screen).
+    @GetMapping("/shop/{id}")
+    public ResponseEntity<RepairBookingResponse> getForShop(HttpServletRequest req, @PathVariable UUID id) {
+        UUID shopId = shopCallerId(req);
+        RepairBooking b = bookingRepo.findById(id).orElseThrow(() -> new ResourceNotFoundException("Booking not found"));
+        if (b.getShopId() == null || !b.getShopId().equals(shopId)) throw new ForbiddenException("Not your shop's booking");
+        return ResponseEntity.ok(enrichCustomerFields(toResponseWithChildren(b), b));
+    }
+
+    // Look up a customer's name & mobile from customer_users. Returns
+    // [name, mobile] (either element may be null). Failures are logged but
+    // do not throw so booking creation never fails on enrichment.
+    //
+    // Binds the id as String with an explicit UUID cast. This avoids the JDBC
+    // setObject(UUID) path, while staying compatible with both PostgreSQL and
+    // H2's PostgreSQL mode used by the dev profile.
+    private String[] lookupCustomerNameMobile(UUID customerUserId) {
+        String[] out = new String[]{null, null};
+        if (customerUserId == null) return out;
+        try {
+            jdbc.query(
+                    "SELECT full_name, mobile FROM customer_users WHERE id = CAST(? AS UUID)",
+                    rs -> { out[0] = rs.getString(1); out[1] = rs.getString(2); },
+                    customerUserId.toString()
+            );
+        } catch (Exception e) {
+            log.warn("customer_users lookup failed for {}: {}", customerUserId, e.getMessage());
+        }
+        return out;
+    }
+
+    // Add customer name/mobile and resolved pickup address to a booking response.
+    // Uses raw JDBC against customer_users / customer_addresses so it works even
+    // if the JPA bootstrap hasn't picked up new entities. The customer_name /
+    // customer_mobile columns on repair_bookings are the source of truth — this
+    // JDBC fallback only fires for legacy rows where those columns are blank.
+    private RepairBookingResponse enrichCustomerFields(RepairBookingResponse r, RepairBooking b) {
+        try {
+            jdbc.query(
+                    "SELECT cu.full_name AS customer_full_name, cu.mobile AS customer_mobile, " +
+                            "ca.label, ca.full_name AS address_full_name, ca.mobile AS address_mobile, " +
+                            "ca.pincode, ca.locality, ca.address_line, ca.city, ca.state " +
+                            "FROM repair_bookings rb " +
+                            "LEFT JOIN customer_users cu ON cu.id = rb.customer_user_id " +
+                            "LEFT JOIN customer_addresses ca ON ca.id = rb.pickup_address_id " +
+                            "WHERE rb.id = CAST(? AS UUID)",
+                    rs -> {
+                        String customerName = rs.getString("customer_full_name");
+                        String customerMobile = rs.getString("customer_mobile");
+                        String addressName = rs.getString("address_full_name");
+                        String addressMobile = rs.getString("address_mobile");
+                        String pincode = rs.getString("pincode");
+                        String locality = rs.getString("locality");
+                        String addressLine = rs.getString("address_line");
+                        String city = rs.getString("city");
+                        String state = rs.getString("state");
+
+                        if (isBlank(r.getCustomerName())) {
+                            r.setCustomerName(firstNonBlank(customerName, addressName));
+                        }
+                        if (isBlank(r.getCustomerMobile())) {
+                            r.setCustomerMobile(firstNonBlank(customerMobile, addressMobile));
+                        }
+                        String addressText = joinAddress(addressLine, locality, city, state, pincode);
+                        if (!isBlank(addressText)) r.setPickupAddressText(addressText);
+                        r.setPickupAddressPincode(pincode);
+                        r.setPickupAddressMobile(addressMobile);
+                        r.setPickupAddressLabel(rs.getString("label"));
+                    },
+                    b.getId().toString()
+            );
+        } catch (Exception e) {
+            log.warn("repair booking customer/address join failed for {}: {}", b.getId(), e.getMessage());
+        }
+        if (isBlank(r.getCustomerName()) || isBlank(r.getCustomerMobile())) {
+            String[] snap = lookupCustomerNameMobile(b.getCustomerUserId());
+            if (isBlank(r.getCustomerName())) r.setCustomerName(snap[0]);
+            if (isBlank(r.getCustomerMobile())) r.setCustomerMobile(snap[1]);
+        }
+        return r;
+    }
+
+    private static boolean isBlank(String s) {
+        return s == null || s.isBlank();
+    }
+
+    private static String firstNonBlank(String... values) {
+        if (values == null) return null;
+        for (String value : values) {
+            if (value != null && !value.isBlank()) return value;
+        }
+        return null;
+    }
+
+    private static String joinAddress(String addressLine, String locality, String city, String state, String pincode) {
+        List<String> parts = new java.util.ArrayList<>();
+        if (addressLine != null && !addressLine.isBlank()) parts.add(addressLine.trim());
+        if (locality    != null && !locality.isBlank())    parts.add(locality.trim());
+        if (city        != null && !city.isBlank())        parts.add(city.trim());
+        if (state       != null && !state.isBlank())       parts.add(state.trim());
+        if (pincode     != null && !pincode.isBlank())     parts.add(pincode.trim());
+        return parts.isEmpty() ? null : String.join(", ", parts);
     }
 
     // Owner appends a service-timeline status (the customer History reads these
@@ -216,12 +328,77 @@ public class RepairBookingController {
         return ResponseEntity.ok(toResponseWithChildren(b));
     }
 
+    // Shop owner confirms a freshly-placed pickup booking. Flips the booking
+    // status from ORDER_PLACED → ORDER_SERVICE_CONFIRMED, drops a timeline
+    // event the customer screen reads, and notifies the customer. Idempotent:
+    // re-calling on an already-confirmed booking is a no-op.
+    @PostMapping("/{id}/confirm-order")
+    @Transactional
+    public ResponseEntity<RepairBookingResponse> confirmOrder(HttpServletRequest req, @PathVariable UUID id) {
+        UUID shopId = shopCallerId(req);
+        RepairBooking b = bookingRepo.findById(id).orElseThrow(() -> new ResourceNotFoundException("Booking not found"));
+        if (b.getShopId() == null || !b.getShopId().equals(shopId)) throw new ForbiddenException("Not your shop's booking");
+        if (!"ORDER_SERVICE_CONFIRMED".equalsIgnoreCase(b.getStatus())) {
+            b.setStatus("ORDER_SERVICE_CONFIRMED");
+            bookingRepo.save(b);
+            eventRepo.save(RepairBookingEvent.builder()
+                    .bookingId(b.getId()).status("ORDER_SERVICE_CONFIRMED")
+                    .note("Shop confirmed the pickup request").actor("SHOP").build());
+            notifyCustomer(b, "ORDER_SERVICE_CONFIRMED", "Service confirmed",
+                    "Booking " + b.getBookingNumber() + " - the shop confirmed your pickup request.");
+        }
+        return ResponseEntity.ok(toResponseWithChildren(b));
+    }
+
+    // Shop owner assigns (or reassigns) the pickup person handling this
+    // booking. Requires the booking to have been confirmed first so the
+    // timeline progresses in order (ORDER_SERVICE_CONFIRMED → PICKUP_ASSIGNED).
+    // Stores the agent id + denormalized name/phone on repair_bookings so the
+    // customer screen can show "Pickup by <name>" without a cross-service call.
+    @PostMapping("/{id}/assign-pickup")
+    @Transactional
+    public ResponseEntity<RepairBookingResponse> assignPickupPerson(HttpServletRequest req, @PathVariable UUID id, @RequestBody AssignPickupPersonRequest body) {
+        UUID shopId = shopCallerId(req);
+        RepairBooking b = bookingRepo.findById(id).orElseThrow(() -> new ResourceNotFoundException("Booking not found"));
+        if (b.getShopId() == null || !b.getShopId().equals(shopId)) throw new ForbiddenException("Not your shop's booking");
+        if (body == null || body.getPickupPersonId() == null) throw new IllegalArgumentException("pickupPersonId is required");
+        // The customer Pickup Status timeline expects ORDER_SERVICE_CONFIRMED
+        // before PICKUP_ASSIGNED. Auto-confirm so the owner can assign in a
+        // single tap on a fresh booking without leaving an out-of-order timeline.
+        String prevStatus = b.getStatus();
+        if ("ORDER_PLACED".equalsIgnoreCase(prevStatus)) {
+            eventRepo.save(RepairBookingEvent.builder()
+                    .bookingId(b.getId()).status("ORDER_SERVICE_CONFIRMED")
+                    .note("Shop confirmed the pickup request").actor("SHOP").build());
+            notifyCustomer(b, "ORDER_SERVICE_CONFIRMED", "Service confirmed",
+                    "Booking " + b.getBookingNumber() + " - the shop confirmed your pickup request.");
+        }
+        boolean reassign = b.getAssignedPickupPersonId() != null
+                && !body.getPickupPersonId().equals(b.getAssignedPickupPersonId());
+        b.setAssignedPickupPersonId(body.getPickupPersonId());
+        b.setPickupPersonName(body.getPickupPersonName());
+        b.setPickupPersonPhone(body.getPickupPersonPhone());
+        b.setStatus("PICKUP_ASSIGNED");
+        bookingRepo.save(b);
+        String displayName = body.getPickupPersonName() != null && !body.getPickupPersonName().isBlank()
+                ? body.getPickupPersonName() : "pickup agent";
+        eventRepo.save(RepairBookingEvent.builder()
+                .bookingId(b.getId())
+                .status(reassign ? "PICKUP_REASSIGNED" : "PICKUP_ASSIGNED")
+                .note((reassign ? "Reassigned to " : "Assigned to ") + displayName)
+                .actor("SHOP").build());
+        notifyCustomer(b, "PICKUP_ASSIGNED",
+                reassign ? "Pickup person reassigned" : "Pickup person assigned",
+                "Booking " + b.getBookingNumber() + " - " + displayName + " will pick up your device.");
+        return ResponseEntity.ok(toResponseWithChildren(b));
+    }
+
     @PostMapping("/{id}/reschedule")
     @Transactional
     public ResponseEntity<RepairBookingResponse> reschedule(HttpServletRequest req, @PathVariable UUID id, @RequestBody RescheduleRequest body) {
-        UUID userId = callerId(req);
+        UUID userId = customerCallerId(req);
         RepairBooking b = bookingRepo.findById(id).orElseThrow(() -> new ResourceNotFoundException("Booking not found"));
-        if (!b.getCustomerUserId().equals(userId)) throw new ForbiddenException("Not your booking");
+        assertCustomerOwnsBooking(b, userId);
         if (body.getPickupDate() != null) b.setPickupDate(body.getPickupDate());
         if (body.getPickupSlotStart() != null) b.setPickupSlotStart(body.getPickupSlotStart());
         if (body.getPickupSlotEnd() != null) b.setPickupSlotEnd(body.getPickupSlotEnd());
@@ -237,9 +414,9 @@ public class RepairBookingController {
     @PostMapping("/{id}/customer-approval")
     @Transactional
     public ResponseEntity<RepairBookingResponse> customerApproval(HttpServletRequest req, @PathVariable UUID id) {
-        UUID userId = callerId(req);
+        UUID userId = customerCallerId(req);
         RepairBooking b = bookingRepo.findById(id).orElseThrow(() -> new ResourceNotFoundException("Booking not found"));
-        if (!b.getCustomerUserId().equals(userId)) throw new ForbiddenException("Not your booking");
+        assertCustomerOwnsBooking(b, userId);
         b.setCustomerApproval("DONE");
         bookingRepo.save(b);
         if (b.getTicketId() != null) {
@@ -257,9 +434,9 @@ public class RepairBookingController {
     @PostMapping("/{id}/cancel")
     @Transactional
     public ResponseEntity<RepairBookingResponse> cancel(HttpServletRequest req, @PathVariable UUID id) {
-        UUID userId = callerId(req);
+        UUID userId = customerCallerId(req);
         RepairBooking b = bookingRepo.findById(id).orElseThrow(() -> new ResourceNotFoundException("Booking not found"));
-        if (!b.getCustomerUserId().equals(userId)) throw new ForbiddenException("Not your booking");
+        assertCustomerOwnsBooking(b, userId);
         b.setStatus("CANCELLED");
         bookingRepo.save(b);
         eventRepo.save(RepairBookingEvent.builder()
@@ -302,6 +479,7 @@ public class RepairBookingController {
         String tCustomerApproval = t != null && Boolean.TRUE.equals(t.getCustomerApproval()) ? "DONE" : null;
         return RepairBookingResponse.builder()
                 .id(b.getId()).bookingNumber(b.getBookingNumber())
+                .customerUserId(b.getCustomerUserId())
                 .shopId(b.getShopId()).ticketId(b.getTicketId()).savedDeviceId(b.getSavedDeviceId())
                 .brandId(b.getBrandId()).modelId(b.getModelId())
                 .ramOptionId(b.getRamOptionId()).storageOptionId(b.getStorageOptionId())
@@ -330,6 +508,9 @@ public class RepairBookingController {
                 .technicianName(b.getTechnicianName())
                 .technicianCode(b.getTechnicianCode())
                 .technicianPhotos(splitCsv(b.getTechnicianPhotos()))
+                .assignedPickupPersonId(b.getAssignedPickupPersonId())
+                .pickupPersonName(b.getPickupPersonName())
+                .pickupPersonPhone(b.getPickupPersonPhone())
                 .createdAt(b.getCreatedAt()).updatedAt(b.getUpdatedAt())
                 .build();
     }
@@ -404,6 +585,31 @@ public class RepairBookingController {
             if (bookingRepo.findByBookingNumber(c).isEmpty()) return c;
         }
         throw new IllegalStateException("Could not generate unique booking number");
+    }
+
+    private UUID customerCallerId(HttpServletRequest req) {
+        requireRole(req, "CUSTOMER");
+        return callerId(req);
+    }
+
+    private void assertCustomerOwnsBooking(RepairBooking b, UUID userId) {
+        if (customerOwnsBooking(b, userId)) return;
+        throw new ForbiddenException("Not your booking");
+    }
+
+    private boolean customerOwnsBooking(RepairBooking b, UUID userId) {
+        if (b == null || userId == null) return false;
+        if (userId.equals(b.getCustomerUserId())) return true;
+        return customerOrderRepo.existsByReferenceIdAndCustomerUserId(b.getId(), userId);
+    }
+
+    @SuppressWarnings("unchecked")
+    private void requireRole(HttpServletRequest req, String role) {
+        Object raw = req.getAttribute("roles");
+        if (raw instanceof List<?> roles && roles.stream().anyMatch(r -> role.equalsIgnoreCase(String.valueOf(r)))) {
+            return;
+        }
+        throw new ForbiddenException("Role not allowed");
     }
 
     private UUID callerId(HttpServletRequest req) {

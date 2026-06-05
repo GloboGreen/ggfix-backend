@@ -37,8 +37,9 @@ public class JwtAuthFilter extends OncePerRequestFilter {
                         .collect(Collectors.toList());
                 UsernamePasswordAuthenticationToken auth = new UsernamePasswordAuthenticationToken(
                         userId.toString(), null, authorities);
-                request.setAttribute("shopId", shopId.toString());
+                if (shopId != null) request.setAttribute("shopId", shopId.toString());
                 request.setAttribute("userId", userId.toString());
+                request.setAttribute("roles", roles);
                 SecurityContextHolder.getContext().setAuthentication(auth);
             } catch (Exception ignored) {
                 // Invalid token – continue without auth

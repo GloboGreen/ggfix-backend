@@ -153,8 +153,17 @@ public class CustomerOrderController {
     }
 
     private UUID callerId(HttpServletRequest req) {
+        requireRole(req, "CUSTOMER");
         Object u = req.getAttribute("userId");
         if (u == null) throw new ForbiddenException("Missing userId");
         return UUID.fromString(u.toString());
+    }
+
+    private void requireRole(HttpServletRequest req, String role) {
+        Object raw = req.getAttribute("roles");
+        if (raw instanceof List<?> roles && roles.stream().anyMatch(r -> role.equalsIgnoreCase(String.valueOf(r)))) {
+            return;
+        }
+        throw new ForbiddenException("Role not allowed");
     }
 }

@@ -103,4 +103,10 @@ public class TicketResponse {
 
     @Schema(description = "Estimated delivery at")
     private Instant estimatedDeliveryAt;
+
+    @Schema(description = "Assigned technician name (denormalized for customer-side render)")
+    private String assignedTechnicianName;
+
+    @Schema(description = "Short uppercase technician code (first 8 chars of technician id)")
+    private String assignedTechnicianCode;
 }

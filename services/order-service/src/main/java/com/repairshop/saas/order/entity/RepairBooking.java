@@ -18,7 +18,6 @@ public class RepairBooking {
     @Column(name = "customer_user_id", nullable = false) private UUID customerUserId;
     @Column(name = "shop_id") private UUID shopId;
     @Column(name = "ticket_id") private UUID ticketId;
-    @Column(name = "assigned_technician_id") private UUID assignedTechnicianId;
     @Column(name = "saved_device_id") private UUID savedDeviceId;
     @Column(name = "brand_id") private UUID brandId;
     @Column(name = "model_id") private UUID modelId;
@@ -48,6 +47,9 @@ public class RepairBooking {
     @Column(name = "technician_name", length = 120) private String technicianName;
     @Column(name = "technician_code", length = 40) private String technicianCode;
     @Column(name = "technician_photos", columnDefinition = "TEXT") private String technicianPhotos;
+    @Column(name = "assigned_pickup_person_id") private UUID assignedPickupPersonId;
+    @Column(name = "pickup_person_name", length = 120) private String pickupPersonName;
+    @Column(name = "pickup_person_phone", length = 30) private String pickupPersonPhone;
     @Column(name = "created_at", nullable = false, updatable = false) private Instant createdAt;
     @Column(name = "updated_at", nullable = false) private Instant updatedAt;
 

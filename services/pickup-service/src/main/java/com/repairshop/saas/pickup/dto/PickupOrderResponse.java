@@ -19,6 +19,7 @@ import java.util.UUID;
 public class PickupOrderResponse {
     private UUID id;
     private String orderNumber;
+    private UUID customerUserId;
     private UUID shopId;
     private UUID ticketId;
     private UUID addressId;

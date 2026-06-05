@@ -12,4 +12,12 @@ public interface RepairBookingRepository extends JpaRepository<RepairBooking, UU
     List<RepairBooking> findByCustomerUserIdAndStatusOrderByCreatedAtDesc(UUID customerUserId, String status);
     List<RepairBooking> findByShopIdOrderByCreatedAtDesc(UUID shopId);
     Optional<RepairBooking> findByBookingNumber(String bookingNumber);
+
+    // Used by CustomerOrderController to prune REPAIR/PICKUP/ENQUIRY rows whose
+    // referenced repair_bookings row is gone (orphans created by out-of-band
+    // deletes — customer_orders has no FK on reference_id).
+    @org.springframework.data.jpa.repository.Query(
+            "SELECT b.id FROM RepairBooking b WHERE b.id IN :ids")
+    List<UUID> findExistingIds(
+            @org.springframework.data.repository.query.Param("ids") java.util.Collection<UUID> ids);
 }

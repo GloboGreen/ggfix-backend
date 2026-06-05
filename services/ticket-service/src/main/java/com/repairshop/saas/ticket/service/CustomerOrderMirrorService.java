@@ -73,7 +73,6 @@ public class CustomerOrderMirrorService {
         boolean isNew = booking.getId() == null;
         // Snapshot prior state so we can decide which timeline events to emit
         // after the save (the entity fields are about to be overwritten).
-        UUID prevTechId = isNew ? null : booking.getAssignedTechnicianId();
         String prevBookingStatus = isNew ? null : booking.getStatus();
 
         if (isNew) {
@@ -84,7 +83,6 @@ public class CustomerOrderMirrorService {
             booking.setServiceMode("WALK_IN");
         }
         UUID newTechId = ticket.getAssignedTechnicianId();
-        booking.setAssignedTechnicianId(newTechId);
         Technician tech = newTechId != null
                 ? technicianRepository.findById(newTechId).orElse(null)
                 : null;
@@ -118,9 +116,17 @@ public class CustomerOrderMirrorService {
                 ticket.getRepairServicesSummary());
 
         emitTimelineEvents(booking.getId(), isNew, prevBookingStatus, bookingStatus,
-                prevTechId, newTechId, tech, upper(ticket.getStatus()));
+                newTechId, tech, upper(ticket.getStatus()));
 
-        PlatformCustomerOrder co = customerOrderRepo.findByReferenceId(booking.getId())
+        // Orphan recovery: a prior mirror run may have left a customer_orders row
+        // pointing at a now-deleted booking. Re-pointing it at the freshly-created
+        // booking avoids hitting the order_number unique constraint and preserves
+        // the customer_orders id the customer's My Orders list already knows about.
+        // Final ref so the .or() lambda can capture it — `booking` itself was
+        // reassigned by bookingRepo.save above and is not effectively final.
+        final PlatformRepairBooking savedBooking = booking;
+        PlatformCustomerOrder co = customerOrderRepo.findByReferenceId(savedBooking.getId())
+                .or(() -> customerOrderRepo.findByOrderNumber(savedBooking.getBookingNumber()))
                 .orElseGet(PlatformCustomerOrder::new);
         boolean coIsNew = co.getId() == null;
         if (coIsNew) {
@@ -128,8 +134,8 @@ public class CustomerOrderMirrorService {
             co.setCustomerUserId(platformUserId);
             co.setShopId(ticket.getShopId());
             co.setOrderType("REPAIR");
-            co.setReferenceId(booking.getId());
         }
+        co.setReferenceId(booking.getId());
         co.setStatus(orderStatus);
         co.setTotalAmount(ticket.getEstimatedPrice());
         co.setPayloadJson(buildPayloadJson(ticket, booking));
@@ -158,7 +164,7 @@ public class CustomerOrderMirrorService {
      */
     private void emitTimelineEvents(UUID bookingId, boolean isNew,
                                     String prevBookingStatus, String bookingStatus,
-                                    UUID prevTechId, UUID newTechId,
+                                    UUID newTechId,
                                     Technician tech, String ticketStatus) {
         if (isNew) {
             bookingEventRepo.save(PlatformRepairBookingEvent.builder()
@@ -171,9 +177,8 @@ public class CustomerOrderMirrorService {
         }
 
         String techName = tech != null ? tech.getName() : "technician";
-        boolean techChanged = !java.util.Objects.equals(prevTechId, newTechId);
 
-        if (newTechId != null && techChanged) {
+        if (newTechId != null) {
             List<PlatformRepairBookingEvent> existing =
                     bookingEventRepo.findByBookingIdOrderByCreatedAtAsc(bookingId);
             boolean hadAssignBefore = existing.stream().anyMatch(
@@ -186,10 +191,6 @@ public class CustomerOrderMirrorService {
                 bookingEventRepo.save(PlatformRepairBookingEvent.builder()
                         .bookingId(bookingId).status("ASSIGN_TECHNICIAN")
                         .note("Assigned to " + techName).actor("SHOP").build());
-            } else {
-                bookingEventRepo.save(PlatformRepairBookingEvent.builder()
-                        .bookingId(bookingId).status("REASSIGN_TECHNICIAN")
-                        .note("Re-assigned to " + techName).actor("SHOP").build());
             }
             // Each (re)assignment puts the booking back into a not-accepted
             // state; emit once so the customer sees the "Awaiting acceptance"

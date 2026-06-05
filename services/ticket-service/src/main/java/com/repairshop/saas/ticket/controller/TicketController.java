@@ -1,5 +1,6 @@
 package com.repairshop.saas.ticket.controller;
 
+import com.repairshop.saas.ticket.dto.TicketEventResponse;
 import com.repairshop.saas.ticket.dto.TicketRequest;
 import com.repairshop.saas.ticket.dto.TicketResponse;
 import com.repairshop.saas.ticket.service.TicketService;
@@ -13,7 +14,10 @@ import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.server.ResponseStatusException;
 
+import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 
@@ -50,6 +54,33 @@ public class TicketController {
         UUID shopId = shopIdFrom(request);
         if (shopId == null) throw new IllegalStateException("Missing shop context");
         return ticketService.getById(shopId, id);
+    }
+
+    @GetMapping("/customer/{id}")
+    @Operation(summary = "Get ticket by ID for the customer who placed it (mobile My Orders → Service → View Details)")
+    public TicketResponse getForCustomer(@PathVariable UUID id, HttpServletRequest request) {
+        requireRole(request, "CUSTOMER");
+        UUID userId = userIdFrom(request);
+        if (userId == null) throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Missing user context");
+        return ticketService.getForCustomer(userId, id);
+    }
+
+    @GetMapping("/{id}/events")
+    @Operation(summary = "Service timeline events for a ticket (owner BookingTimelineScreen)")
+    public List<TicketEventResponse> getEvents(@PathVariable UUID id, HttpServletRequest request) {
+        UUID shopId = shopIdFrom(request);
+        if (shopId == null) throw new IllegalStateException("Missing shop context");
+        return ticketService.getEventsForShop(shopId, id);
+    }
+
+    @SuppressWarnings("unchecked")
+    private void requireRole(HttpServletRequest request, String role) {
+        Object raw = request.getAttribute("roles");
+        if (raw instanceof List<?> roles
+                && roles.stream().anyMatch(r -> role.equalsIgnoreCase(String.valueOf(r).trim().toUpperCase(Locale.ROOT)))) {
+            return;
+        }
+        throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Role not allowed");
     }
 
     @GetMapping

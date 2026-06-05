@@ -1,18 +1,25 @@
 package com.repairshop.saas.ticket.service;
 
+import com.repairshop.saas.ticket.dto.TicketEventResponse;
 import com.repairshop.saas.ticket.dto.TicketRequest;
 import com.repairshop.saas.ticket.dto.TicketResponse;
+import com.repairshop.saas.ticket.entity.Customer;
 import com.repairshop.saas.ticket.entity.Technician;
 import com.repairshop.saas.ticket.entity.Ticket;
 import com.repairshop.saas.ticket.exception.ResourceNotFoundException;
+import com.repairshop.saas.ticket.repository.CustomerRepository;
+import com.repairshop.saas.ticket.repository.PlatformRepairBookingEventRepository;
+import com.repairshop.saas.ticket.repository.PlatformRepairBookingRepository;
 import com.repairshop.saas.ticket.repository.TechnicianRepository;
 import com.repairshop.saas.ticket.repository.TicketRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.Pageable;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.server.ResponseStatusException;
 
 import java.util.Collections;
 import java.util.HashMap;
@@ -26,6 +33,9 @@ public class TicketService {
 
     private final TicketRepository ticketRepository;
     private final TechnicianRepository technicianRepository;
+    private final CustomerRepository customerRepository;
+    private final PlatformRepairBookingRepository platformRepairBookingRepository;
+    private final PlatformRepairBookingEventRepository platformRepairBookingEventRepository;
     private final CustomerOrderMirrorService customerOrderMirrorService;
 
     private static final String TRACKING_PREFIX = "CSPEN";
@@ -35,6 +45,53 @@ public class TicketService {
         Ticket t = ticketRepository.findByShopIdAndId(shopId, id)
                 .orElseThrow(() -> new ResourceNotFoundException("Ticket not found: " + id));
         return toResponse(t);
+    }
+
+    /**
+     * Service timeline for the owner BookingTimelineScreen. Reads from the
+     * mirrored repair_booking_events (same table the customer history reads),
+     * scoped to a ticket via repair_bookings.ticket_id. Returns an empty list
+     * (not 404) when the mirror booking hasn't been created yet so the screen
+     * can render its phase skeleton.
+     */
+    @Transactional(readOnly = true)
+    public List<TicketEventResponse> getEventsForShop(UUID shopId, UUID ticketId) {
+        Ticket t = ticketRepository.findByShopIdAndId(shopId, ticketId)
+                .orElseThrow(() -> new ResourceNotFoundException("Ticket not found: " + ticketId));
+        return platformRepairBookingRepository.findByTicketId(t.getId())
+                .map(b -> platformRepairBookingEventRepository
+                        .findByBookingIdOrderByCreatedAtAsc(b.getId())
+                        .stream()
+                        .map(e -> TicketEventResponse.builder()
+                                .id(e.getId())
+                                .status(e.getStatus())
+                                .note(e.getNote())
+                                .actor(e.getActor())
+                                .createdAt(e.getCreatedAt())
+                                .build())
+                        .toList())
+                .orElse(List.of());
+    }
+
+    /**
+     * Read a single ticket as the customer who placed it. Ownership is established
+     * by ticket.customer_id → customers.platform_user_id == JWT subject. The
+     * device security value is masked since the customer already knows their own
+     * PIN/pattern and the field is sensitive in transit.
+     */
+    @Transactional(readOnly = true)
+    public TicketResponse getForCustomer(UUID platformUserId, UUID id) {
+        Ticket t = ticketRepository.findById(id)
+                .orElseThrow(() -> new ResourceNotFoundException("Ticket not found: " + id));
+        if (t.getCustomerId() == null) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Ticket has no customer");
+        }
+        Customer c = customerRepository.findById(t.getCustomerId()).orElse(null);
+        if (c == null || c.getPlatformUserId() == null
+                || !c.getPlatformUserId().equals(platformUserId)) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Not your ticket");
+        }
+        return toCustomerResponse(t);
     }
 
     @Transactional(readOnly = true)
@@ -197,6 +254,20 @@ public class TicketService {
     private String generateTrackingId(UUID shopId) {
         String suffix = String.valueOf(System.currentTimeMillis() % 10000000);
         return TRACKING_PREFIX + suffix;
+    }
+
+    /** Customer-facing read: masks PIN/pattern value, joins technician name+code. */
+    private TicketResponse toCustomerResponse(Ticket t) {
+        TicketResponse base = toResponse(t);
+        base.setDeviceSecurityValue(null);
+        if (t.getAssignedTechnicianId() != null) {
+            technicianRepository.findById(t.getAssignedTechnicianId()).ifPresent(tech -> {
+                base.setAssignedTechnicianName(tech.getName());
+                base.setAssignedTechnicianCode(
+                        t.getAssignedTechnicianId().toString().substring(0, 8).toUpperCase());
+            });
+        }
+        return base;
     }
 
     private TicketResponse toResponse(Ticket t) {

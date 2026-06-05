@@ -13,4 +13,6 @@ public interface CustomerPickupOrderRepository extends JpaRepository<CustomerPic
     List<CustomerPickupOrder> findByCustomerUserIdOrderByCreatedAtDesc(UUID customerUserId);
     Optional<CustomerPickupOrder> findByOrderNumber(String orderNumber);
     List<CustomerPickupOrder> findByCustomerUserIdAndStatusInOrderByCreatedAtDesc(UUID customerUserId, List<String> statuses);
+    List<CustomerPickupOrder> findByShopIdOrderByCreatedAtDesc(UUID shopId);
+    List<CustomerPickupOrder> findByShopIdAndStatusInOrderByCreatedAtDesc(UUID shopId, List<String> statuses);
 }
