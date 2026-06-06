@@ -85,5 +85,10 @@ public class CreateShopOwnerRequest {
         private String pickupToTime;
         private Integer pickupDistanceKm;
         private Boolean pickupEnabled;
+
+        // Shop working hours (admin Edit Business Location form)
+        private String workingDays;   // MON_FRI | MON_SAT | MON_SUN
+        private String openingTime;   // e.g. "08:00 AM"
+        private String closingTime;   // e.g. "07:00 PM"
     }
 }

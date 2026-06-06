@@ -91,6 +91,18 @@ public class Shop {
     @Column(name = "pickup_enabled", nullable = false)
     private Boolean pickupEnabled = false;
 
+    /** Preset day range: MON_FRI | MON_SAT | MON_SUN. */
+    @Column(name = "working_days", length = 20)
+    private String workingDays;
+
+    /** Human-readable open time (e.g. "08:00 AM"), matches pickup_from_time shape. */
+    @Column(name = "opening_time", length = 16)
+    private String openingTime;
+
+    /** Human-readable close time (e.g. "07:00 PM"). */
+    @Column(name = "closing_time", length = 16)
+    private String closingTime;
+
     @Column(name = "is_active", nullable = false)
     private Boolean isActive = true;
 

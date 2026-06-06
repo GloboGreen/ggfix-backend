@@ -244,9 +244,8 @@ public class ShopDirectoryController {
         if (!shopRepository.existsById(id)) {
             throw new ResourceNotFoundException("Shop not found: " + id);
         }
-        if (req.getStartTime() == null || req.getEndTime() == null) {
-            throw new IllegalArgumentException("startTime and endTime are required");
-        }
+        validateSlotRequest(req);
+        checkOverlap(id, req, null);
         ShopPickupSlot slot = ShopPickupSlot.builder()
                 .shopId(id)
                 .dayOfWeek(req.getDayOfWeek())
@@ -254,6 +253,27 @@ public class ShopDirectoryController {
                 .endTime(req.getEndTime())
                 .capacity(req.getCapacity() == null ? 10 : req.getCapacity())
                 .build();
+        return ResponseEntity.ok(toSlotResponse(pickupSlotRepository.save(slot)));
+    }
+
+    @PutMapping("/{id}/pickup-slots/{slotId}")
+    public ResponseEntity<PickupSlotResponse> updatePickupSlot(@PathVariable UUID id,
+                                                               @PathVariable UUID slotId,
+                                                               @RequestBody ShopPickupSlotRequest req) {
+        if (!shopRepository.existsById(id)) {
+            throw new ResourceNotFoundException("Shop not found: " + id);
+        }
+        ShopPickupSlot slot = pickupSlotRepository.findById(slotId)
+                .orElseThrow(() -> new ResourceNotFoundException("Slot not found: " + slotId));
+        if (!slot.getShopId().equals(id)) {
+            throw new ResourceNotFoundException("Slot not found for shop: " + slotId);
+        }
+        validateSlotRequest(req);
+        checkOverlap(id, req, slotId);
+        slot.setDayOfWeek(req.getDayOfWeek());
+        slot.setStartTime(req.getStartTime());
+        slot.setEndTime(req.getEndTime());
+        slot.setCapacity(req.getCapacity() == null ? 10 : req.getCapacity());
         return ResponseEntity.ok(toSlotResponse(pickupSlotRepository.save(slot)));
     }
 
@@ -266,6 +286,39 @@ public class ShopDirectoryController {
         }
         pickupSlotRepository.delete(slot);
         return ResponseEntity.noContent().build();
+    }
+
+    private void validateSlotRequest(ShopPickupSlotRequest req) {
+        if (req.getStartTime() == null || req.getEndTime() == null) {
+            throw new IllegalArgumentException("startTime and endTime are required");
+        }
+        if (!req.getStartTime().isBefore(req.getEndTime())) {
+            throw new IllegalArgumentException("startTime must be before endTime");
+        }
+        // dayOfWeek null = any-day per ShopPickupSlotRequest doc; otherwise 1..7 ISO.
+        if (req.getDayOfWeek() != null && (req.getDayOfWeek() < 1 || req.getDayOfWeek() > 7)) {
+            throw new IllegalArgumentException("dayOfWeek must be 1..7 (Mon..Sun) or null for any-day");
+        }
+        if (req.getCapacity() != null && req.getCapacity() < 1) {
+            throw new IllegalArgumentException("capacity must be >= 1");
+        }
+    }
+
+    private void checkOverlap(UUID shopId, ShopPickupSlotRequest req, UUID excludeSlotId) {
+        Short day = req.getDayOfWeek();
+        List<ShopPickupSlot> existing = pickupSlotRepository.findByShopId(shopId);
+        for (ShopPickupSlot s : existing) {
+            if (excludeSlotId != null && s.getId().equals(excludeSlotId)) continue;
+            // any-day slots (null dayOfWeek) overlap with everything; same-day slots only overlap each other.
+            boolean sameDay = day == null || s.getDayOfWeek() == null
+                    || java.util.Objects.equals(s.getDayOfWeek(), day);
+            if (!sameDay) continue;
+            if (s.getStartTime().isBefore(req.getEndTime()) && req.getStartTime().isBefore(s.getEndTime())) {
+                throw new IllegalArgumentException(
+                        "Overlaps existing slot " + s.getStartTime() + "–" + s.getEndTime()
+                        + (s.getDayOfWeek() == null ? " (any day)" : " (day " + s.getDayOfWeek() + ")"));
+            }
+        }
     }
 
     // -------------------------------------------------------------------------

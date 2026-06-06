@@ -343,6 +343,9 @@ public class AuthService {
                     .pickupEnabled(loc.getPickupEnabled() != null ? loc.getPickupEnabled() : false)
                     .gstCertificateUrl(loc.getGstCertificateUrl())
                     .udyamCertificateUrl(loc.getUdyamCertificateUrl())
+                    .workingDays(loc.getWorkingDays())
+                    .openingTime(loc.getOpeningTime())
+                    .closingTime(loc.getClosingTime())
                     .ownerUserId(owner.getId())
                     .isActive(true)
                     .build();
@@ -599,6 +602,9 @@ public class AuthService {
                 .bannerImageUrl(loc.getBannerImageUrl())
                 .gstCertificateUrl(loc.getGstCertificateUrl())
                 .udyamCertificateUrl(loc.getUdyamCertificateUrl())
+                .workingDays(loc.getWorkingDays())
+                .openingTime(loc.getOpeningTime())
+                .closingTime(loc.getClosingTime())
                 .ownerUserId(owner.getId())
                 .isActive(true)
                 .build();
@@ -635,6 +641,9 @@ public class AuthService {
         if (loc.getPickupToTime() != null)         shop.setPickupToTime(loc.getPickupToTime());
         if (loc.getPickupDistanceKm() != null)     shop.setPickupDistanceKm(loc.getPickupDistanceKm());
         if (loc.getPickupEnabled() != null)        shop.setPickupEnabled(loc.getPickupEnabled());
+        if (loc.getWorkingDays() != null)          shop.setWorkingDays(loc.getWorkingDays());
+        if (loc.getOpeningTime() != null)          shop.setOpeningTime(loc.getOpeningTime());
+        if (loc.getClosingTime() != null)          shop.setClosingTime(loc.getClosingTime());
         if (loc.getGstCertificateUrl() != null)    shop.setGstCertificateUrl(loc.getGstCertificateUrl());
         if (loc.getUdyamCertificateUrl() != null)  shop.setUdyamCertificateUrl(loc.getUdyamCertificateUrl());
         shopRepository.save(shop);
@@ -698,6 +707,9 @@ public class AuthService {
                 .pickupToTime(s.getPickupToTime())
                 .pickupDistanceKm(s.getPickupDistanceKm())
                 .pickupEnabled(s.getPickupEnabled())
+                .workingDays(s.getWorkingDays())
+                .openingTime(s.getOpeningTime())
+                .closingTime(s.getClosingTime())
                 .gstCertificateUrl(s.getGstCertificateUrl())
                 .udyamCertificateUrl(s.getUdyamCertificateUrl())
                 .isActive(s.getIsActive())

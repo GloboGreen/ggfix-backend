@@ -71,6 +71,9 @@ public class ShopOwnerView {
         private String pickupToTime;
         private Integer pickupDistanceKm;
         private Boolean pickupEnabled;
+        private String workingDays;
+        private String openingTime;
+        private String closingTime;
         private Boolean isActive;
         private Integer progressPercent;   // derived: % of documents/fields supplied
         private Instant createdAt;
