@@ -20,7 +20,11 @@ import java.util.UUID;
 public class PlatformRepairBooking {
     @Id @GeneratedValue(strategy = GenerationType.UUID) private UUID id;
     @Column(name = "booking_number", nullable = false, unique = true, length = 60) private String bookingNumber;
-    @Column(name = "customer_user_id", nullable = false) private UUID customerUserId;
+    // Nullable: walk-in customers (no platform_user_id link) still get a
+    // booking mirror row so the owner Service History rail and the technician
+    // can read the timeline events. Customer-side feed mirroring (customer_orders,
+    // notifications) is skipped for these rows since there's no recipient.
+    @Column(name = "customer_user_id") private UUID customerUserId;
     @Column(name = "shop_id") private UUID shopId;
     @Column(name = "ticket_id") private UUID ticketId;
     @Column(name = "brand_id") private UUID brandId;

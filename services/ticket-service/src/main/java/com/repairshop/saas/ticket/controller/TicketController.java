@@ -1,5 +1,9 @@
 package com.repairshop.saas.ticket.controller;
 
+import com.repairshop.saas.ticket.dto.CreateRepairNoteRequest;
+import com.repairshop.saas.ticket.dto.CreateSolutionPackRequest;
+import com.repairshop.saas.ticket.dto.RepairNoteResponse;
+import com.repairshop.saas.ticket.dto.SolutionPackResponse;
 import com.repairshop.saas.ticket.dto.TicketEventResponse;
 import com.repairshop.saas.ticket.dto.TicketRequest;
 import com.repairshop.saas.ticket.dto.TicketResponse;
@@ -141,5 +145,76 @@ public class TicketController {
         UUID shopId = shopIdFrom(request);
         if (shopId == null) throw new IllegalStateException("Missing shop context");
         ticketService.updateStatus(shopId, id, status);
+    }
+
+    // ---------- Repair notes ----------------------------------------------
+
+    @PostMapping("/{id}/notes")
+    @ResponseStatus(HttpStatus.CREATED)
+    @Operation(summary = "Add a repair note to a ticket (used by the tech detail screen's Compliance Notes submit)")
+    public RepairNoteResponse addNote(
+            @PathVariable UUID id,
+            @Valid @RequestBody CreateRepairNoteRequest body,
+            HttpServletRequest request) {
+        UUID shopId = shopIdFrom(request);
+        if (shopId == null) throw new IllegalStateException("Missing shop context");
+        return ticketService.addRepairNote(shopId, id, userIdFrom(request), body);
+    }
+
+    @GetMapping("/{id}/notes")
+    @Operation(summary = "List repair notes attached to a ticket")
+    public List<RepairNoteResponse> listNotes(@PathVariable UUID id, HttpServletRequest request) {
+        UUID shopId = shopIdFrom(request);
+        if (shopId == null) throw new IllegalStateException("Missing shop context");
+        return ticketService.listRepairNotes(shopId, id);
+    }
+
+    // ---------- Solution packs --------------------------------------------
+
+    @GetMapping("/{id}/solution-packs")
+    @Operation(summary = "List solution packs for a ticket (filter by packType: REFERENCE | NEW)")
+    public List<SolutionPackResponse> listSolutionPacks(
+            @PathVariable UUID id,
+            @RequestParam(required = false) String packType,
+            HttpServletRequest request) {
+        UUID shopId = shopIdFrom(request);
+        if (shopId == null) throw new IllegalStateException("Missing shop context");
+        return ticketService.listSolutionPacks(shopId, id, packType);
+    }
+
+    @PostMapping("/{id}/solution-packs")
+    @ResponseStatus(HttpStatus.CREATED)
+    @Operation(summary = "Attach a new solution pack to a ticket (file URL produced by /media/upload first)")
+    public SolutionPackResponse addSolutionPack(
+            @PathVariable UUID id,
+            @Valid @RequestBody CreateSolutionPackRequest body,
+            HttpServletRequest request) {
+        UUID shopId = shopIdFrom(request);
+        if (shopId == null) throw new IllegalStateException("Missing shop context");
+        return ticketService.addSolutionPack(shopId, id, userIdFrom(request), body);
+    }
+
+    // Service-progress checklist on the technician Ticket Detail screen.
+    // Each Submit click POSTs here with the row's status key; backend emits
+    // (or refreshes) the matching repair_booking_events row.
+    @PostMapping("/{id}/progress-events")
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    @Operation(summary = "Emit a service-progress step event (Parts Required, Quality Check, ...)")
+    public void emitProgressEvent(
+            @PathVariable UUID id,
+            @RequestBody ProgressEventRequest body,
+            HttpServletRequest request) {
+        UUID shopId = shopIdFrom(request);
+        if (shopId == null) throw new IllegalStateException("Missing shop context");
+        ticketService.emitProgressStepEvent(shopId, id, body.getStatusKey(), body.getNote(), body.getActor());
+    }
+
+    @lombok.Data
+    public static class ProgressEventRequest {
+        private String statusKey;
+        private String note;
+        /** Caller-supplied actor — TECHNICIAN (default) or OWNER. Frontend uses
+         *  this to distinguish manually-submitted rows from auto-emitted ones. */
+        private String actor;
     }
 }

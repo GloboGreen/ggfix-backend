@@ -89,6 +89,9 @@ public class TicketResponse {
     @Schema(description = "Device photos JSON")
     private String devicePhotosJson;
 
+    @Schema(description = "Technician-uploaded post-acceptance photos JSON (array of URLs)")
+    private String technicianPhotosJson;
+
     @Schema(description = "Device security type")
     private String deviceSecurityType;
 

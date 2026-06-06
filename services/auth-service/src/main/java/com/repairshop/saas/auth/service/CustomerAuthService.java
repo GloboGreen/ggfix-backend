@@ -9,6 +9,8 @@ import com.repairshop.saas.auth.exception.UnauthorizedException;
 import com.repairshop.saas.auth.repository.CustomerUserRepository;
 import com.repairshop.saas.auth.security.JwtService;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -18,6 +20,7 @@ import java.util.UUID;
 
 @Service
 @RequiredArgsConstructor
+@Slf4j
 public class CustomerAuthService {
 
     private static final List<String> CUSTOMER_ROLES = List.of("CUSTOMER");
@@ -25,6 +28,10 @@ public class CustomerAuthService {
     private final CustomerUserRepository customerUserRepository;
     private final JwtService jwtService;
     private final PasswordEncoder passwordEncoder;
+    // Direct JDBC: customers + customer_user_addresses etc. live in tables
+    // owned by sibling services. We only need a single UPDATE to walk-in
+    // rows so a full JPA mapping would be overkill.
+    private final JdbcTemplate jdbc;
 
     @Transactional
     public CustomerAuthResponse register(CustomerRegisterRequest request) {
@@ -49,11 +56,35 @@ public class CustomerAuthService {
                 .build();
         user = customerUserRepository.save(user);
 
+        // Auto-link any walk-in customers rows that match this mobile so the
+        // shop's prior tickets for this person show up in My Orders immediately.
+        linkExistingWalkInRows(user.getId(), mobile);
+
         String token = jwtService.issueCustomerToken(user.getId(), CUSTOMER_ROLES);
         return toResponse(user, token);
     }
 
-    @Transactional(readOnly = true)
+    // UPDATE every customers row with this phone that has no platform_user_id
+    // yet, pointing it at the new customer_users.id. Idempotent — re-runs are
+    // a no-op once the rows are linked. Errors are swallowed (and logged) so
+    // a missing customers table doesn't block sign-up in dev.
+    private void linkExistingWalkInRows(UUID customerUserId, String mobile) {
+        if (mobile == null || mobile.isBlank()) return;
+        try {
+            int updated = jdbc.update(
+                    "UPDATE customers SET platform_user_id = ? "
+                    + "WHERE phone = ? AND platform_user_id IS NULL",
+                    customerUserId, mobile);
+            if (updated > 0) {
+                log.info("Linked {} walk-in customers row(s) to customer_users {} (mobile {})",
+                        updated, customerUserId, mobile);
+            }
+        } catch (Exception e) {
+            log.warn("Walk-in customers auto-link failed for mobile {}: {}", mobile, e.getMessage());
+        }
+    }
+
+    @Transactional
     public CustomerAuthResponse login(CustomerLoginRequest request) {
         String mobile = request.getMobile() != null ? request.getMobile().trim() : null;
         String email = request.getEmail() != null && !request.getEmail().isBlank()
@@ -88,6 +119,10 @@ public class CustomerAuthService {
                     || !passwordEncoder.matches(request.getPassword(), user.getPasswordHash()))
                 throw new UnauthorizedException("Invalid credentials");
         }
+
+        // Defensive heal: walk-in customers rows added after the user signed
+        // up don't get linked at register time; pick them up on login too.
+        linkExistingWalkInRows(user.getId(), user.getMobile());
 
         String token = jwtService.issueCustomerToken(user.getId(), CUSTOMER_ROLES);
         return toResponse(user, token);

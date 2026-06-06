@@ -98,9 +98,18 @@ public class RepairBookingController {
 
         eventRepo.save(RepairBookingEvent.builder()
                 .bookingId(saved.getId())
-                .status("ORDER_PLACED")
-                .note("Booking placed")
+                .status("BOOKING_CREATED_BY_SHOP")
+                .note("Booking Created by Shop")
                 .actor("SYSTEM")
+                .build());
+        // Creating a booking from the shop side is an implicit "service accepted"
+        // step — the shop confirms they'll take the work the moment the booking
+        // is saved, so the timeline lights up both rows together.
+        eventRepo.save(RepairBookingEvent.builder()
+                .bookingId(saved.getId())
+                .status("SERVICE_ACCEPTED")
+                .note("Service Accepted")
+                .actor("SHOP")
                 .build());
 
         // Write unified customer_orders row. Map service mode → orderType so
@@ -339,12 +348,15 @@ public class RepairBookingController {
         RepairBooking b = bookingRepo.findById(id).orElseThrow(() -> new ResourceNotFoundException("Booking not found"));
         if (b.getShopId() == null || !b.getShopId().equals(shopId)) throw new ForbiddenException("Not your shop's booking");
         if (!"ORDER_SERVICE_CONFIRMED".equalsIgnoreCase(b.getStatus())) {
+            // booking macro status stays as ORDER_SERVICE_CONFIRMED — that
+            // column drives downstream pickup logic. The TIMELINE event uses
+            // the new SERVICE_ACCEPTED step key.
             b.setStatus("ORDER_SERVICE_CONFIRMED");
             bookingRepo.save(b);
             eventRepo.save(RepairBookingEvent.builder()
-                    .bookingId(b.getId()).status("ORDER_SERVICE_CONFIRMED")
-                    .note("Shop confirmed the pickup request").actor("SHOP").build());
-            notifyCustomer(b, "ORDER_SERVICE_CONFIRMED", "Service confirmed",
+                    .bookingId(b.getId()).status("SERVICE_ACCEPTED")
+                    .note("Service Accepted").actor("SHOP").build());
+            notifyCustomer(b, "SERVICE_ACCEPTED", "Service Accepted",
                     "Booking " + b.getBookingNumber() + " - the shop confirmed your pickup request.");
         }
         return ResponseEntity.ok(toResponseWithChildren(b));
@@ -368,9 +380,9 @@ public class RepairBookingController {
         String prevStatus = b.getStatus();
         if ("ORDER_PLACED".equalsIgnoreCase(prevStatus)) {
             eventRepo.save(RepairBookingEvent.builder()
-                    .bookingId(b.getId()).status("ORDER_SERVICE_CONFIRMED")
-                    .note("Shop confirmed the pickup request").actor("SHOP").build());
-            notifyCustomer(b, "ORDER_SERVICE_CONFIRMED", "Service confirmed",
+                    .bookingId(b.getId()).status("SERVICE_ACCEPTED")
+                    .note("Service Accepted").actor("SHOP").build());
+            notifyCustomer(b, "SERVICE_ACCEPTED", "Service Accepted",
                     "Booking " + b.getBookingNumber() + " - the shop confirmed your pickup request.");
         }
         boolean reassign = b.getAssignedPickupPersonId() != null
@@ -425,9 +437,13 @@ public class RepairBookingController {
                 platformTicketRepo.save(t);
             });
         }
+        // Emit the dedicated step key so the timeline rail lights up
+        // "Customer Approved" instead of the generic macro status.
         eventRepo.save(RepairBookingEvent.builder()
-                .bookingId(b.getId()).status(b.getStatus())
-                .note("Customer approved repair").actor("USER").build());
+                .bookingId(b.getId()).status("CUSTOMER_APPROVED")
+                .note("Customer Approved").actor("USER").build());
+        notifyCustomer(b, "CUSTOMER_APPROVED", "Customer Approved",
+                "You approved the repair estimate for booking " + b.getBookingNumber() + ".");
         return ResponseEntity.ok(toResponseWithChildren(b));
     }
 

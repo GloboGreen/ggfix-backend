@@ -112,6 +112,15 @@ public class Ticket {
     private String devicePhotosJson;
 
     /**
+     * JSON-encoded photos uploaded by the technician AFTER they accept the
+     * ticket. Separate from device_photos_json (booking-time photos) so the
+     * customer-side history can show "before vs after" if it wants to.
+     * Shape: ["https://...", "https://..."] — list of URLs.
+     */
+    @Column(name = "technician_photos_json", columnDefinition = "TEXT")
+    private String technicianPhotosJson;
+
+    /**
      * Device security type: NONE, PATTERN, PIN, PASSWORD.
      */
     @Column(name = "device_security_type", length = 20)

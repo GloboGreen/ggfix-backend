@@ -11,10 +11,9 @@ import lombok.Setter;
 import java.util.UUID;
 
 /**
- * Read-only view of the platform-wide customer_addresses table (owned by
- * user-service). ticket-service reads it so the owner New-Booking flow can
- * prefill the structured address fields when picking a customer who already
- * entered an address through the customer app.
+ * Read/write view of the platform-wide customer_addresses table. ticket-service
+ * CREATES a row here when the shop owner adds a new customer with an address —
+ * tagged as the customer's default home so the customer app prefills it.
  */
 @Entity
 @Table(name = "customer_addresses")
@@ -24,6 +23,7 @@ import java.util.UUID;
 public class PlatformCustomerAddress {
 
     @Id
+    @jakarta.persistence.GeneratedValue(strategy = jakarta.persistence.GenerationType.UUID)
     private UUID id;
 
     @Column(name = "customer_user_id")

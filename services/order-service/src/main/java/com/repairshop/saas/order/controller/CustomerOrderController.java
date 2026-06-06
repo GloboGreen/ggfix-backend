@@ -5,10 +5,12 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.repairshop.saas.order.dto.CustomerOrderResponse;
 import com.repairshop.saas.order.entity.CustomerNotification;
 import com.repairshop.saas.order.entity.CustomerOrder;
+import com.repairshop.saas.order.entity.RepairBookingEvent;
 import com.repairshop.saas.order.exception.ForbiddenException;
 import com.repairshop.saas.order.exception.ResourceNotFoundException;
 import com.repairshop.saas.order.repository.CustomerNotificationRepository;
 import com.repairshop.saas.order.repository.CustomerOrderRepository;
+import com.repairshop.saas.order.repository.RepairBookingEventRepository;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
@@ -29,10 +31,54 @@ public class CustomerOrderController {
 
     private final CustomerOrderRepository repo;
     private final CustomerNotificationRepository notificationRepo;
+    private final RepairBookingEventRepository eventRepo;
     private final ObjectMapper objectMapper;
 
     private static final SecureRandom RANDOM = new SecureRandom();
     private static final String ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+
+    // Repair-flow order types whose live status is sourced from the booking
+    // timeline rather than customer_orders.status. Keep in sync with the
+    // TAB_MAP in MyOrdersScreen.js — the Sell / Buy tabs do not have timelines.
+    private static final java.util.Set<String> TIMELINE_ORDER_TYPES =
+            java.util.Set.of("REPAIR", "PICKUP", "ENQUIRY");
+
+    // Mirror of SHOP_BOOKING_STATUS_OPTIONS in
+    // repair-shop-mobile/src/screens/common/serviceHistoryPhases.js. Backend
+    // is the source of truth for the label so the My Orders card matches the
+    // History timeline row that's currently marked "NOW".
+    private static final java.util.Map<String, String> PHASE_LABELS;
+    static {
+        java.util.LinkedHashMap<String, String> m = new java.util.LinkedHashMap<>();
+        m.put("BOOKING_CREATED_BY_SHOP",                       "Booking Created by Shop");
+        m.put("SERVICE_ACCEPTED",                              "Service Accepted");
+        m.put("ASSIGNED_TO_TECHNICIAN",                        "Assigned to Technician");
+        m.put("AWAITING_TECHNICIAN_ACCEPTANCE",                "Awaiting Technician Acceptance");
+        m.put("REASSIGNED_TO_TECHNICIAN",                      "Re-Assign to Technician");
+        m.put("TECHNICIAN_ACCEPTED_SERVICE",                   "Technician Accepted Service");
+        m.put("TECHNICIAN_WORK_STARTED",                       "Technician Work Started");
+        m.put("TECHNICIAN_UPLOADED_DEVICE_IMAGES",             "Technician Uploaded Device Images");
+        m.put("TECHNICIAN_COMPLIANCE_ISSUE_VERIFIED_UPDATED",  "Technician Compliance Issue Verified & Updated");
+        m.put("RE_ESTIMATED_CONFIRMED",                        "Re-Estimated Confirmed");
+        m.put("CUSTOMER_APPROVED",                             "Customer Approved");
+        m.put("CUSTOMER_REJECTED",                             "Customer Rejected");
+        m.put("IN_REPAIR",                                     "Repair Work In Progress");
+        m.put("PARTS_REQUIRED",                                "Parts Required");
+        m.put("PARTS_REPLACED",                                "Parts Replaced");
+        m.put("QUALITY_CHECK_STARTED",                         "Quality Check Started");
+        m.put("QUALITY_CHECK_COMPLETED",                       "Quality Check Completed");
+        m.put("REPAIR_COMPLETED",                              "Repair Completed");
+        m.put("READY",                                         "Ready for Delivery");
+        m.put("DELIVERED",                                     "Delivered to Customer");
+        m.put("CANCELLED",                                     "Work Cancelled");
+        // Pickup-flow keys emitted by /confirm-order and /assign-pickup. Kept
+        // in this map so the My Orders Pickup tab also gets a human label.
+        m.put("ORDER_SERVICE_CONFIRMED",                       "Service Accepted");
+        m.put("PICKUP_ASSIGNED",                               "Pickup person assigned");
+        m.put("PICKUP_REASSIGNED",                             "Pickup person reassigned");
+        m.put("ORDER_PLACED",                                  "Booking Placed");
+        PHASE_LABELS = java.util.Collections.unmodifiableMap(m);
+    }
 
     @GetMapping
     public ResponseEntity<List<CustomerOrderResponse>> list(
@@ -144,10 +190,29 @@ public class CustomerOrderController {
             try { payload = objectMapper.readValue(o.getPayloadJson(), new TypeReference<Map<String, Object>>() {}); }
             catch (Exception ignored) { payload = Map.of("raw", o.getPayloadJson()); }
         }
+        String phaseStatus = null;
+        String phaseLabel = null;
+        if (o.getReferenceId() != null
+                && o.getOrderType() != null
+                && TIMELINE_ORDER_TYPES.contains(o.getOrderType().toUpperCase())) {
+            RepairBookingEvent latest = eventRepo
+                    .findFirstByBookingIdOrderByCreatedAtDesc(o.getReferenceId())
+                    .orElse(null);
+            if (latest != null && latest.getStatus() != null) {
+                phaseStatus = latest.getStatus().toUpperCase();
+                String mapped = PHASE_LABELS.get(phaseStatus);
+                phaseLabel = mapped != null ? mapped
+                        : (latest.getNote() != null && !latest.getNote().isBlank()
+                                ? latest.getNote()
+                                : phaseStatus.replace('_', ' '));
+            }
+        }
         return CustomerOrderResponse.builder()
                 .id(o.getId()).orderNumber(o.getOrderNumber()).shopId(o.getShopId())
                 .orderType(o.getOrderType()).referenceId(o.getReferenceId())
-                .status(o.getStatus()).totalAmount(o.getTotalAmount())
+                .status(o.getStatus())
+                .phaseStatus(phaseStatus).phaseLabel(phaseLabel)
+                .totalAmount(o.getTotalAmount())
                 .payload(payload).createdAt(o.getCreatedAt()).updatedAt(o.getUpdatedAt())
                 .build();
     }

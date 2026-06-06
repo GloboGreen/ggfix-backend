@@ -6,6 +6,7 @@ import com.repairshop.saas.ticket.entity.*;
 import com.repairshop.saas.ticket.repository.*;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
@@ -29,7 +30,6 @@ import java.util.UUID;
 @RequiredArgsConstructor
 public class CustomerOrderMirrorService {
 
-    private final CustomerRepository customerRepository;
     private final TechnicianRepository technicianRepository;
     private final PlatformRepairBookingRepository bookingRepo;
     private final PlatformRepairBookingServiceRepository bookingServiceRepo;
@@ -57,11 +57,18 @@ public class CustomerOrderMirrorService {
             "IN_DIAGNOSIS", "IN_REPAIR", "QUOTED", "APPROVED", "READY", "DELIVERED"
     );
 
-    /** Insert (or update) the platform-side booking + customer order for a ticket. */
-    @Transactional
+    /** Insert (or update) the platform-side booking + customer order for a ticket.
+     *  Runs in its OWN transaction (REQUIRES_NEW) so that read-path callers like
+     *  TicketService.getEventsForShop can swallow a mirror failure without the
+     *  outer transaction being marked rollback-only — otherwise the subsequent
+     *  events read would throw UnexpectedRollbackException. */
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
     public void mirrorOnUpsert(Ticket ticket) {
+        // platformUserId may be null for walk-in customers. We still create
+        // the booking row (with customer_user_id null) so the timeline rail
+        // and owner-side history work; the customer-facing feed mirror
+        // (customer_orders, notifications) is skipped further down.
         UUID platformUserId = resolvePlatformUserId(ticket);
-        if (platformUserId == null) return; // walk-in / non-platform customer
 
         String[] mapped = STATUS_MAP.getOrDefault(
                 upper(ticket.getStatus()), new String[]{"ORDER_PLACED", "PENDING"});
@@ -77,7 +84,7 @@ public class CustomerOrderMirrorService {
 
         if (isNew) {
             booking.setBookingNumber(makeBookingNumber(ticket));
-            booking.setCustomerUserId(platformUserId);
+            booking.setCustomerUserId(platformUserId); // may be null for walk-in
             booking.setShopId(ticket.getShopId());
             booking.setTicketId(ticket.getId());
             booking.setServiceMode("WALK_IN");
@@ -117,6 +124,11 @@ public class CustomerOrderMirrorService {
 
         emitTimelineEvents(booking.getId(), isNew, prevBookingStatus, bookingStatus,
                 newTechId, tech, upper(ticket.getStatus()));
+
+        // Customer-side feed (My Orders) + notifications only apply when the
+        // customer has a platform_user_id link. Walk-in tickets stop here —
+        // the booking + timeline events were already saved above.
+        if (platformUserId == null) return;
 
         // Orphan recovery: a prior mirror run may have left a customer_orders row
         // pointing at a now-deleted booking. Re-pointing it at the freshly-created
@@ -168,12 +180,24 @@ public class CustomerOrderMirrorService {
                                     Technician tech, String ticketStatus) {
         if (isNew) {
             bookingEventRepo.save(PlatformRepairBookingEvent.builder()
-                    .bookingId(bookingId).status(bookingStatus)
-                    .note("Booking created by shop").actor("SHOP").build());
-        } else if (prevBookingStatus != null && !prevBookingStatus.equals(bookingStatus)) {
-            // Status actually changed (e.g. CREATED → IN_REPAIR) — log it once.
+                    .bookingId(bookingId).status("BOOKING_CREATED_BY_SHOP")
+                    .note("Booking Created by Shop").actor("SHOP").build());
+            // Shop creating the booking implies service is accepted in the
+            // same step; emit alongside so the timeline rail doesn't skip a row.
             bookingEventRepo.save(PlatformRepairBookingEvent.builder()
-                    .bookingId(bookingId).status(bookingStatus).actor("SHOP").build());
+                    .bookingId(bookingId).status("SERVICE_ACCEPTED")
+                    .note("Service Accepted").actor("SHOP").build());
+        } else if (prevBookingStatus != null && !prevBookingStatus.equals(bookingStatus)) {
+            // Booking macro status actually changed — emit the corresponding
+            // step event from the SHOP_BOOKING_STATUS_OPTIONS list when there
+            // is a 1:1 mapping (IN_REPAIR / READY / DELIVERED / CANCELLED
+            // are themselves valid step keys). Other transitions are surfaced
+            // by their dedicated emits elsewhere.
+            String stepKey = mapMacroStatusToStepKey(bookingStatus);
+            if (stepKey != null) {
+                bookingEventRepo.save(PlatformRepairBookingEvent.builder()
+                        .bookingId(bookingId).status(stepKey).actor("SHOP").build());
+            }
         }
 
         String techName = tech != null ? tech.getName() : "technician";
@@ -182,23 +206,23 @@ public class CustomerOrderMirrorService {
             List<PlatformRepairBookingEvent> existing =
                     bookingEventRepo.findByBookingIdOrderByCreatedAtAsc(bookingId);
             boolean hadAssignBefore = existing.stream().anyMatch(
-                    e -> "ASSIGN_TECHNICIAN".equalsIgnoreCase(e.getStatus())
-                            || "REASSIGN_TECHNICIAN".equalsIgnoreCase(e.getStatus()));
+                    e -> "ASSIGNED_TO_TECHNICIAN".equalsIgnoreCase(e.getStatus())
+                            || "REASSIGNED_TO_TECHNICIAN".equalsIgnoreCase(e.getStatus()));
             boolean hasNotAccepted = existing.stream().anyMatch(
-                    e -> "ASSIGN_NOT_ACCEPTED".equalsIgnoreCase(e.getStatus()));
+                    e -> "AWAITING_TECHNICIAN_ACCEPTANCE".equalsIgnoreCase(e.getStatus()));
 
             if (!hadAssignBefore) {
                 bookingEventRepo.save(PlatformRepairBookingEvent.builder()
-                        .bookingId(bookingId).status("ASSIGN_TECHNICIAN")
+                        .bookingId(bookingId).status("ASSIGNED_TO_TECHNICIAN")
                         .note("Assigned to " + techName).actor("SHOP").build());
             }
             // Each (re)assignment puts the booking back into a not-accepted
-            // state; emit once so the customer sees the "Awaiting acceptance"
+            // state; emit once so the customer sees the awaiting-acceptance
             // step light up with a timestamp.
             if (!hasNotAccepted) {
                 bookingEventRepo.save(PlatformRepairBookingEvent.builder()
-                        .bookingId(bookingId).status("ASSIGN_NOT_ACCEPTED")
-                        .note("Awaiting technician acceptance").actor("SHOP").build());
+                        .bookingId(bookingId).status("AWAITING_TECHNICIAN_ACCEPTANCE")
+                        .note("Awaiting Technician Acceptance").actor("SHOP").build());
             }
         }
 
@@ -206,12 +230,35 @@ public class CustomerOrderMirrorService {
             List<PlatformRepairBookingEvent> existing =
                     bookingEventRepo.findByBookingIdOrderByCreatedAtAsc(bookingId);
             boolean hasAccepted = existing.stream().anyMatch(
-                    e -> "TECHNICIAN_ACCEPTED".equalsIgnoreCase(e.getStatus()));
+                    e -> "TECHNICIAN_ACCEPTED_SERVICE".equalsIgnoreCase(e.getStatus()));
+            boolean hasWorkStarted = existing.stream().anyMatch(
+                    e -> "TECHNICIAN_WORK_STARTED".equalsIgnoreCase(e.getStatus()));
             if (!hasAccepted) {
                 bookingEventRepo.save(PlatformRepairBookingEvent.builder()
-                        .bookingId(bookingId).status("TECHNICIAN_ACCEPTED")
+                        .bookingId(bookingId).status("TECHNICIAN_ACCEPTED_SERVICE")
                         .note(techName + " accepted the service").actor("SHOP").build());
             }
+            // Accepting the service immediately implies the technician has
+            // picked the job up and started work — emit alongside so the
+            // two rows on the timeline share the same moment.
+            if (!hasWorkStarted) {
+                bookingEventRepo.save(PlatformRepairBookingEvent.builder()
+                        .bookingId(bookingId).status("TECHNICIAN_WORK_STARTED")
+                        .note("Technician Work Started").actor("TECHNICIAN").build());
+            }
+        }
+    }
+
+    /** Map a booking macro status to the step key used by the new timeline,
+     *  or null when the macro change is surfaced by a dedicated emit elsewhere. */
+    private static String mapMacroStatusToStepKey(String bookingStatus) {
+        if (bookingStatus == null) return null;
+        switch (bookingStatus.toUpperCase()) {
+            case "IN_REPAIR":  return "IN_REPAIR";
+            case "READY":      return "READY";
+            case "DELIVERED":  return "DELIVERED";
+            case "CANCELLED":  return "CANCELLED";
+            default:           return null;
         }
     }
 
@@ -300,10 +347,12 @@ public class CustomerOrderMirrorService {
     }
 
     private UUID resolvePlatformUserId(Ticket ticket) {
-        if (ticket.getCustomerId() == null) return null;
-        return customerRepository.findById(ticket.getCustomerId())
-                .map(Customer::getPlatformUserId)
-                .orElse(null);
+        // After the customers→customer_users consolidation, tickets.customer_id
+        // IS the customer_users.id (no per-shop indirection). Returning it
+        // directly is correct; the mirror still treats null as "walk-in
+        // without an app account" — the booking row gets created with a
+        // null customer_user_id (column was made nullable earlier).
+        return ticket.getCustomerId();
     }
 
     private String makeBookingNumber(Ticket t) {

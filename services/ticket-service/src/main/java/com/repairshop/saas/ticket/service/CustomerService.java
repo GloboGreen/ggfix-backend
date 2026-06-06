@@ -2,10 +2,8 @@ package com.repairshop.saas.ticket.service;
 
 import com.repairshop.saas.ticket.dto.CustomerRequest;
 import com.repairshop.saas.ticket.dto.CustomerResponse;
-import com.repairshop.saas.ticket.entity.Customer;
 import com.repairshop.saas.ticket.entity.PlatformCustomerAddress;
 import com.repairshop.saas.ticket.entity.PlatformCustomerUser;
-import com.repairshop.saas.ticket.repository.CustomerRepository;
 import com.repairshop.saas.ticket.repository.PlatformCustomerAddressRepository;
 import com.repairshop.saas.ticket.repository.PlatformCustomerUserRepository;
 import lombok.RequiredArgsConstructor;
@@ -28,102 +26,130 @@ public class CustomerService {
     private static final int MAX_LIST_SIZE = 200;
     private static final int MAX_PLATFORM_RESULTS = 50;
 
-    private final CustomerRepository customerRepository;
     private final PlatformCustomerUserRepository platformCustomerUserRepository;
     private final PlatformCustomerAddressRepository platformCustomerAddressRepository;
 
+    /** Default dev OTP seeded on every shop-created customer_users row so the
+     *  customer can log into the mobile app with mobile + 123456 without
+     *  going through the full sign-up form. Auth-service overrides this when
+     *  the customer triggers the real OTP flow. */
+    private static final String DEFAULT_DEV_OTP = "123456";
+
     @Transactional
     public CustomerResponse create(UUID shopId, CustomerRequest request) {
-        Customer c = Customer.builder()
-                .shopId(shopId)
-                .name(request.getName() != null ? request.getName().trim() : null)
-                .email(request.getEmail() != null ? request.getEmail().trim() : null)
-                .phone(request.getPhone() != null ? request.getPhone().trim() : null)
-                .address(request.getAddress() != null ? request.getAddress().trim() : null)
-                .build();
-        c = customerRepository.save(c);
-        return toResponse(c);
+        // Shop-side customer create now writes the platform tables directly:
+        //   customer_users     ← name, mobile, email, dev OTP
+        //   customer_addresses ← the raw address as the default home row
+        // The legacy per-shop `customers` table is no longer inserted to.
+        String name  = request.getName()    != null ? request.getName().trim()    : null;
+        String email = request.getEmail()   != null && !request.getEmail().isBlank()
+                ? request.getEmail().trim().toLowerCase() : null;
+        String phone = request.getPhone()   != null ? request.getPhone().trim()   : null;
+        String addr  = request.getAddress() != null ? request.getAddress().trim() : null;
+
+        // If a customer_users row already exists for this mobile, reuse it
+        // instead of failing on the UNIQUE constraint. Refresh the name/email
+        // from the form so the shop can correct stale data.
+        PlatformCustomerUser user = phone == null
+                ? null
+                : platformCustomerUserRepository.findByMobile(phone).orElse(null);
+        if (user == null) {
+            user = new PlatformCustomerUser();
+            user.setFullName(name);
+            user.setEmail(email);
+            user.setMobile(phone);
+            user.setIsActive(true);
+            user.setOtpCode(DEFAULT_DEV_OTP);
+        } else {
+            if (name != null && !name.isBlank()) user.setFullName(name);
+            if (email != null) user.setEmail(email);
+            if (user.getOtpCode() == null) user.setOtpCode(DEFAULT_DEV_OTP);
+            user.setIsActive(true);
+        }
+        user = platformCustomerUserRepository.save(user);
+
+        // Prefer the structured fields (addressLine / locality / city / state /
+        // pincode) when the form provided them; fall back to the concatenated
+        // `address` string otherwise. Only inserts a default "home" address
+        // when one doesn't already exist for this customer.
+        String addressLine = trimOrNull(request.getAddressLine());
+        String locality    = trimOrNull(request.getLocality());
+        String city        = trimOrNull(request.getCity());
+        String state       = trimOrNull(request.getState());
+        String pincode     = trimOrNull(request.getPincode());
+        if (addressLine == null && addr != null && !addr.isBlank()) addressLine = addr;
+
+        boolean anyAddressField = addressLine != null || locality != null
+                || city != null || state != null || pincode != null;
+        if (anyAddressField) {
+            boolean hasDefault = platformCustomerAddressRepository
+                    .findPreferred(user.getId())
+                    .map(a -> Boolean.TRUE.equals(a.getIsDefault()))
+                    .orElse(false);
+            if (!hasDefault) {
+                PlatformCustomerAddress a = new PlatformCustomerAddress();
+                a.setCustomerUserId(user.getId());
+                a.setAddressLine(addressLine);
+                a.setLocality(locality);
+                a.setCity(city);
+                a.setState(state);
+                a.setPincode(pincode);
+                a.setIsDefault(true);
+                platformCustomerAddressRepository.save(a);
+            }
+        }
+        return toPlatformResponse(user);
+    }
+
+    private static String trimOrNull(String s) {
+        if (s == null) return null;
+        String t = s.trim();
+        return t.isEmpty() ? null : t;
     }
 
     @Transactional(readOnly = true)
     public List<CustomerResponse> search(UUID shopId, String q) {
+        // Single source of truth: customer_users. The shop-scope filter is
+        // gone — any active customer_users row matching the query is
+        // returned. shopId is kept in the signature for API compatibility.
         String query = (q != null ? q.trim() : "");
-        List<Customer> shopList;
-        List<PlatformCustomerUser> platformList;
-        if (query.isEmpty()) {
-            shopList = customerRepository.findByShopIdOrderByCreatedAtDesc(
-                    shopId, PageRequest.of(0, MAX_LIST_SIZE));
-            platformList = Collections.emptyList();
-        } else {
-            shopList = customerRepository.findByShopIdAndSearch(shopId, query);
-            platformList = platformCustomerUserRepository.searchActive(
-                    query, PageRequest.of(0, MAX_PLATFORM_RESULTS));
-        }
-
-        Set<String> shopPhones = new HashSet<>();
-        Set<UUID> linkedPlatformIds = new HashSet<>();
-        List<CustomerResponse> out = new ArrayList<>(shopList.size() + platformList.size());
-        for (Customer c : shopList) {
-            String phone = normalizePhone(c.getPhone());
-            if (phone != null) shopPhones.add(phone);
-            if (c.getPlatformUserId() != null) linkedPlatformIds.add(c.getPlatformUserId());
-            out.add(toResponse(c));
-        }
-        for (PlatformCustomerUser u : platformList) {
-            if (u.getId() != null && linkedPlatformIds.contains(u.getId())) continue;
-            String phone = normalizePhone(u.getMobile());
-            if (phone != null && shopPhones.contains(phone)) continue;
+        List<PlatformCustomerUser> users = query.isEmpty()
+                ? platformCustomerUserRepository.findAll(PageRequest.of(0, MAX_LIST_SIZE)).getContent()
+                : platformCustomerUserRepository.searchActive(query, PageRequest.of(0, MAX_PLATFORM_RESULTS));
+        List<CustomerResponse> out = new ArrayList<>(users.size());
+        for (PlatformCustomerUser u : users) {
             out.add(toPlatformResponse(u));
         }
         return out;
     }
 
     /**
-     * Lookup a customer by exact mobile number. Checks this shop's customers
-     * first; falls back to the platform customer_users table. Used by the
-     * owner New-Customer form so an existing person isn't double-created.
+     * Lookup a customer by exact mobile number against customer_users only.
+     * Used by the owner New-Customer form so an existing person isn't
+     * double-created. Returns empty (→ 204) when no row matches.
      */
     @Transactional(readOnly = true)
     public Optional<CustomerResponse> lookupByMobile(UUID shopId, String mobile) {
         String phone = normalizePhone(mobile);
         if (phone == null) return Optional.empty();
-
-        List<Customer> shopMatches = customerRepository.findByShopIdAndNormalizedPhone(shopId, phone);
-        if (!shopMatches.isEmpty()) {
-            return Optional.of(toResponse(shopMatches.get(0)));
-        }
-
         return platformCustomerUserRepository.findByMobile(phone)
                 .map(this::toPlatformResponse);
     }
 
     /**
-     * Materialize a per-shop customers row for a platform customer_users id.
-     * Idempotent: returns the existing linked row when present.
+     * Returns the existing platform customer row for the given id.
+     * The old per-shop "materialization" no longer happens — there's a
+     * single customer_users row that every shop references.
      */
-    @Transactional
+    @Transactional(readOnly = true)
     public CustomerResponse linkPlatformUser(UUID shopId, UUID platformUserId) {
         if (platformUserId == null) {
             throw new IllegalArgumentException("platformUserId is required");
         }
-        return customerRepository.findByShopIdAndPlatformUserId(shopId, platformUserId)
-                .map(this::toResponse)
-                .orElseGet(() -> {
-                    PlatformCustomerUser u = platformCustomerUserRepository.findById(platformUserId)
-                            .orElseThrow(() -> new IllegalArgumentException(
-                                    "Platform customer not found: " + platformUserId));
-                    PlatformCustomerAddress addr = platformCustomerAddressRepository
-                            .findPreferred(u.getId()).orElse(null);
-                    Customer c = Customer.builder()
-                            .shopId(shopId)
-                            .platformUserId(u.getId())
-                            .name(u.getFullName() != null ? u.getFullName() : "Customer")
-                            .email(u.getEmail())
-                            .phone(u.getMobile() != null ? u.getMobile() : "")
-                            .address(joinAddress(addr))
-                            .build();
-                    return toResponse(customerRepository.save(c));
-                });
+        PlatformCustomerUser u = platformCustomerUserRepository.findById(platformUserId)
+                .orElseThrow(() -> new IllegalArgumentException(
+                        "Platform customer not found: " + platformUserId));
+        return toPlatformResponse(u);
     }
 
     private static String joinAddress(PlatformCustomerAddress a) {
@@ -142,37 +168,9 @@ public class CustomerService {
         return s.isEmpty() ? null : s;
     }
 
-    private CustomerResponse toResponse(Customer c) {
-        // For shop rows linked to a platform user, overlay the platform's
-        // structured address so the owner-side form can prefill state/city/
-        // locality/pincode without the owner having to re-enter them.
-        // Phone-based fallback: many shop rows were created before
-        // linkPlatformUser existed (or via direct create) and have no
-        // platform_user_id FK. Resolve by mobile so prefill still works.
-        UUID platformId = c.getPlatformUserId();
-        if (platformId == null) {
-            String phone = normalizePhone(c.getPhone());
-            if (phone != null) {
-                platformId = platformCustomerUserRepository.findByMobile(phone)
-                        .map(PlatformCustomerUser::getId)
-                        .orElse(null);
-            }
-        }
-        PlatformCustomerAddress addr = platformId != null
-                ? platformCustomerAddressRepository.findPreferred(platformId).orElse(null)
-                : null;
-        CustomerResponse.CustomerResponseBuilder b = CustomerResponse.builder()
-                .id(c.getId())
-                .name(c.getName())
-                .email(c.getEmail())
-                .phone(c.getPhone())
-                .address(c.getAddress())
-                .createdAt(c.getCreatedAt())
-                .source("shop")
-                .platformUserId(c.getPlatformUserId());
-        applyAddress(b, addr);
-        return b.build();
-    }
+    // The old toResponse(Customer) helper was removed along with the
+    // per-shop customers table; everything now flows through
+    // toPlatformResponse(PlatformCustomerUser) below.
 
     private CustomerResponse toPlatformResponse(PlatformCustomerUser u) {
         PlatformCustomerAddress addr = platformCustomerAddressRepository

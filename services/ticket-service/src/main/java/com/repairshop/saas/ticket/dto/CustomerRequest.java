@@ -25,6 +25,12 @@ public class CustomerRequest {
     @Schema(description = "Phone number", required = true)
     private String phone;
 
-    @Schema(description = "Full address (state, district, area, street, pincode, etc.)")
+    @Schema(description = "Concatenated address (legacy field). When the structured fields below are provided they take precedence.")
     private String address;
+
+    @Schema(description = "Door No. / Street") private String addressLine;
+    @Schema(description = "Taluk / Locality")  private String locality;
+    @Schema(description = "District / City")   private String city;
+    @Schema(description = "State")             private String state;
+    @Schema(description = "Pin code")          private String pincode;
 }

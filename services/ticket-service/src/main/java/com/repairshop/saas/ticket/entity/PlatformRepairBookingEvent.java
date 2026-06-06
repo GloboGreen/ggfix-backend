@@ -15,7 +15,10 @@ public class PlatformRepairBookingEvent {
     @Column(nullable = false, length = 100) private String status;
     @Column(columnDefinition = "TEXT") private String note;
     @Column(length = 100) private String actor;
-    @Column(name = "created_at", nullable = false, updatable = false) private Instant createdAt;
+    // updatable=true so emitOrUpdateBookingEvent can refresh the timestamp
+    // on re-submit. The customer/owner timeline rail uses createdAt to find
+    // "the latest action", so a stale value would visually omit a fresh tap.
+    @Column(name = "created_at", nullable = false) private Instant createdAt;
 
     @PrePersist void prePersist() { if (createdAt == null) createdAt = Instant.now(); }
 }
