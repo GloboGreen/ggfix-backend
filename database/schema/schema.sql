@@ -883,6 +883,9 @@ CREATE TABLE repair_bookings (
     technician_name         VARCHAR(120),
     technician_code         VARCHAR(40),
     technician_photos       TEXT,
+    assigned_pickup_person_id UUID,
+    pickup_person_name     VARCHAR(120),
+    pickup_person_phone    VARCHAR(30),
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -912,6 +915,7 @@ CREATE TABLE repair_booking_services (
     service_code        VARCHAR(50),
     service_name        VARCHAR(255),
     estimated_price     DECIMAL(12, 2),
+    warranty            VARCHAR(20),
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -1504,5 +1508,22 @@ BEGIN
             FOR EACH ROW EXECUTE FUNCTION set_updated_at();
     END IF;
 END$$;
+
+COMMIT;
+
+
+-- #############################################################################
+-- 24_technicians_id_documents.sql
+-- #############################################################################
+BEGIN;
+
+ALTER TABLE technicians
+    ADD COLUMN IF NOT EXISTS aadhar_number     VARCHAR(50),
+    ADD COLUMN IF NOT EXISTS aadhar_front_url  VARCHAR(500),
+    ADD COLUMN IF NOT EXISTS aadhar_back_url   VARCHAR(500),
+    ADD COLUMN IF NOT EXISTS pan_number        VARCHAR(50),
+    ADD COLUMN IF NOT EXISTS pan_front_url     VARCHAR(500),
+    ADD COLUMN IF NOT EXISTS pan_back_url      VARCHAR(500),
+    ADD COLUMN IF NOT EXISTS daily_wage        VARCHAR(50);
 
 COMMIT;

@@ -439,22 +439,35 @@ public class TicketService {
 
     private void advanceTicketStatusForWorkCode(Ticket t, String code) {
         if (code == null || code.isBlank()) return;
-        masterWorkStatusRepository.findByCodeIgnoreCase(code).ifPresent(row -> {
-            String target = row.getTicketStatus() == null ? null
-                    : row.getTicketStatus().trim().toUpperCase();
-            if (target == null || target.isBlank()) return;
-            String current = t.getStatus() == null ? "" : t.getStatus().trim().toUpperCase();
-            if (target.equals(current)) return;
-            // CANCELLED / RETURNED are terminal — don't overwrite them.
-            if ("CANCELLED".equals(current) || "RETURNED".equals(current)) return;
-            int currentIdx = LIFECYCLE_ORDER.indexOf(current);
-            int targetIdx = LIFECYCLE_ORDER.indexOf(target);
-            // Both inside the linear ladder → only move forward.
-            if (currentIdx >= 0 && targetIdx >= 0 && targetIdx < currentIdx) return;
-            t.setStatus(target);
-            ticketRepository.save(t);
-            customerOrderMirrorService.mirrorOnUpsert(t);
-        });
+        String normalized = code.trim().toUpperCase();
+
+        // Primary: look up the admin-managed master row.
+        String target = masterWorkStatusRepository.findByCodeIgnoreCase(normalized)
+                .map(row -> row.getTicketStatus() == null ? null : row.getTicketStatus().trim().toUpperCase())
+                .filter(s -> !s.isBlank())
+                .orElse(null);
+
+        // Fallback: when the work-status key IS itself a lifecycle status
+        // (DELIVERED, CANCELLED, READY, …), use it directly. This covers the
+        // case where the master row exists under a different code (e.g.
+        // DELIVERED_TO_CUSTOMER) so the badge would otherwise be stuck at
+        // READY after the technician's "Delivered to Customer" submission.
+        if (target == null && (LIFECYCLE_ORDER.contains(normalized) || "CANCELLED".equals(normalized))) {
+            target = normalized;
+        }
+        if (target == null || target.isBlank()) return;
+
+        String current = t.getStatus() == null ? "" : t.getStatus().trim().toUpperCase();
+        if (target.equals(current)) return;
+        // CANCELLED / RETURNED are terminal — don't overwrite them.
+        if ("CANCELLED".equals(current) || "RETURNED".equals(current)) return;
+        int currentIdx = LIFECYCLE_ORDER.indexOf(current);
+        int targetIdx = LIFECYCLE_ORDER.indexOf(target);
+        // Both inside the linear ladder → only move forward.
+        if (currentIdx >= 0 && targetIdx >= 0 && targetIdx < currentIdx) return;
+        t.setStatus(target);
+        ticketRepository.save(t);
+        customerOrderMirrorService.mirrorOnUpsert(t);
     }
 
     private static String defaultProgressLabel(String key) {

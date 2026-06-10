@@ -44,11 +44,32 @@ public class TechnicianResponse {
     @Schema(description = "Salary period e.g. Monthly, Weekly")
     private String salaryPeriod;
 
-    @Schema(description = "ID verification type e.g. Aadhar, PAN")
+    @Schema(description = "ID verification type e.g. Aadhar, PAN (legacy)")
     private String idVerificationType;
 
-    @Schema(description = "ID number (masked in UI if needed)")
+    @Schema(description = "ID number (legacy)")
     private String idNumber;
+
+    @Schema(description = "Aadhar card number")
+    private String aadharNumber;
+
+    @Schema(description = "Aadhar card front image URL")
+    private String aadharFrontUrl;
+
+    @Schema(description = "Aadhar card back image URL")
+    private String aadharBackUrl;
+
+    @Schema(description = "PAN card number")
+    private String panNumber;
+
+    @Schema(description = "PAN card front image URL")
+    private String panFrontUrl;
+
+    @Schema(description = "PAN card back image URL")
+    private String panBackUrl;
+
+    @Schema(description = "Daily wage amount")
+    private String dailyWage;
 
     @Schema(description = "Date of birth")
     private LocalDate dateOfBirth;

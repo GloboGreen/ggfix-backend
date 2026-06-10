@@ -140,6 +140,7 @@ public class AuthService {
                 .email(user.getEmail())
                 .name(user.getName())
                 .roles(List.of(user.getRole()))
+                .roleLabel(friendlyEmployeeRoleLabel(user.getRole()))
                 .shops(shopList)
                 .build();
     }
@@ -245,7 +246,7 @@ public class AuthService {
                 .email(request.getEmail())
                 .passwordHash(passwordEncoder.encode(request.getPassword()))
                 .name(request.getName() != null ? request.getName() : request.getEmail())
-                .role("TECHNICIAN")
+                .role(canonicalEmployeeRole(request.getRoleLabel()))
                 .isActive(true)
                 .build();
         user = userRepository.save(user);
@@ -757,5 +758,43 @@ public class AuthService {
                 .isActive(shop.getIsActive())
                 .status(Boolean.TRUE.equals(shop.getIsActive()) ? "ACTIVE" : "SUSPENDED")
                 .build();
+    }
+
+    // Map the owner-UI friendly label (Technician / Staff / Pickup Person) to the
+    // canonical role stored in users.role. Defaults to TECHNICIAN when omitted so
+    // older clients still work.
+    static String canonicalEmployeeRole(String roleLabel) {
+        if (roleLabel == null) return "TECHNICIAN";
+        String normalized = roleLabel.trim().toUpperCase().replace(' ', '_');
+        if (normalized.isEmpty()) return "TECHNICIAN";
+        switch (normalized) {
+            case "PICKUP_PERSON":
+            case "PICKUPPERSON":
+                return "PICKUP_PERSON";
+            case "STAFF":
+                return "STAFF";
+            case "TECHNICIAN":
+            default:
+                return "TECHNICIAN";
+        }
+    }
+
+    // Inverse of canonicalEmployeeRole: convert the stored role back to the
+    // owner-UI friendly label. Tolerates the legacy "PICKUP PERSON" form.
+    static String friendlyEmployeeRoleLabel(String storedRole) {
+        if (storedRole == null) return null;
+        String normalized = storedRole.trim().toUpperCase().replace(' ', '_');
+        switch (normalized) {
+            case "PICKUP_PERSON":
+                return "Pickup Person";
+            case "STAFF":
+                return "Staff";
+            case "TECHNICIAN":
+                return "Technician";
+            case "SHOP_OWNER":
+                return "Shop Owner";
+            default:
+                return storedRole;
+        }
     }
 }

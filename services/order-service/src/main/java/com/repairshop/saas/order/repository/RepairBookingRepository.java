@@ -13,6 +13,11 @@ public interface RepairBookingRepository extends JpaRepository<RepairBooking, UU
     List<RepairBooking> findByShopIdOrderByCreatedAtDesc(UUID shopId);
     Optional<RepairBooking> findByBookingNumber(String bookingNumber);
 
+    // Pickup-person feed (employee app). assigned_pickup_person_id stores the
+    // technician row id, NOT the user id — resolve userId → technicians.id in
+    // the controller before calling.
+    List<RepairBooking> findByAssignedPickupPersonIdOrderByCreatedAtDesc(UUID pickupPersonId);
+
     // Used by CustomerOrderController to prune REPAIR/PICKUP/ENQUIRY rows whose
     // referenced repair_bookings row is gone (orphans created by out-of-band
     // deletes — customer_orders has no FK on reference_id).

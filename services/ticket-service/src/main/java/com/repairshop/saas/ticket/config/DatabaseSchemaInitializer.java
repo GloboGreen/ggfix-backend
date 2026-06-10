@@ -1,4 +1,4 @@
-package com.repairshop.saas.order.config;
+package com.repairshop.saas.ticket.config;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -15,14 +15,14 @@ public class DatabaseSchemaInitializer {
     private final JdbcTemplate jdbc;
 
     @Bean
-    ApplicationRunner ensureOrderSchema() {
+    ApplicationRunner ensureTicketSchema() {
         return args -> {
             addColumnIfMissing("repair_bookings", "assigned_pickup_person_id", "UUID");
             addColumnIfMissing("repair_bookings", "pickup_person_name", "VARCHAR(120)");
             addColumnIfMissing("repair_bookings", "pickup_person_phone", "VARCHAR(30)");
-            // Pickup-person Repair Estimate flow stores per-service warranty
-            // (3M/6M/12M) so the customer and owner can audit what the
-            // technician committed to.
+            // Mirrors the order-service initializer — ticket-service can boot
+            // first in some setups, and the pickup-person estimate flow reads
+            // this column. Idempotent ADD COLUMN IF NOT EXISTS is safe.
             addColumnIfMissing("repair_booking_services", "warranty", "VARCHAR(20)");
         };
     }

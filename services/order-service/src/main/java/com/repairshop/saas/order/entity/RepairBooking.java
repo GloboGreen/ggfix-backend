@@ -16,6 +16,13 @@ public class RepairBooking {
     @Id @GeneratedValue(strategy = GenerationType.UUID) private UUID id;
     @Column(name = "booking_number", nullable = false, unique = true, length = 60) private String bookingNumber;
     @Column(name = "customer_user_id", nullable = false) private UUID customerUserId;
+    // Denormalized customer identity (migration 30). Lets the owner-side
+    // Bookings History and Pickup Service screens render the customer's name
+    // / mobile without a runtime JOIN against customer_users — which the
+    // ticket-service mint step also relies on when it copies these fields
+    // into tickets.customer_name / customer_phone.
+    @Column(name = "customer_name", length = 255) private String customerName;
+    @Column(name = "customer_mobile", length = 50) private String customerMobile;
     @Column(name = "shop_id") private UUID shopId;
     @Column(name = "ticket_id") private UUID ticketId;
     @Column(name = "saved_device_id") private UUID savedDeviceId;
@@ -50,6 +57,14 @@ public class RepairBooking {
     @Column(name = "assigned_pickup_person_id") private UUID assignedPickupPersonId;
     @Column(name = "pickup_person_name", length = 120) private String pickupPersonName;
     @Column(name = "pickup_person_phone", length = 30) private String pickupPersonPhone;
+    // Pickup hand-off milestones (migrations 44 + 45). Written by ticket-service's
+    // PickupBookingController. Surfaced so the shop-owner pickup detail response
+    // can render audited Reached/Received timestamps and the staff member who
+    // physically took the device.
+    @Column(name = "reached_shop_at") private Instant reachedShopAt;
+    @Column(name = "received_at_shop_at") private Instant receivedAtShopAt;
+    @Column(name = "received_by_user_id") private UUID receivedByUserId;
+    @Column(name = "received_by_user_name", length = 255) private String receivedByUserName;
     @Column(name = "created_at", nullable = false, updatable = false) private Instant createdAt;
     @Column(name = "updated_at", nullable = false) private Instant updatedAt;
 

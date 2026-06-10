@@ -541,6 +541,9 @@ CREATE TABLE repair_bookings (
     technician_name         VARCHAR(120),
     technician_code         VARCHAR(40),
     technician_photos       TEXT,
+    assigned_pickup_person_id UUID,
+    pickup_person_name     VARCHAR(120),
+    pickup_person_phone    VARCHAR(30),
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -572,6 +575,7 @@ CREATE TABLE repair_booking_services (
     service_code        VARCHAR(50),
     service_name        VARCHAR(255),
     estimated_price     DECIMAL(12, 2),
+    warranty            VARCHAR(20),
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 

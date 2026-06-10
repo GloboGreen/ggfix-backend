@@ -39,6 +39,9 @@ public class LoginResponse {
     @Schema(description = "User roles")
     private List<String> roles;
 
+    @Schema(description = "Friendly role label for employee-app UI routing (Technician / Staff / Pickup Person / Shop Owner)")
+    private String roleLabel;
+
     @Schema(description = "Display name of the active shop (for the JWT shopId)")
     private String shopName;
 

@@ -57,6 +57,27 @@ public class Technician {
     @Column(name = "id_number", length = 100)
     private String idNumber;
 
+    @Column(name = "aadhar_number", length = 50)
+    private String aadharNumber;
+
+    @Column(name = "aadhar_front_url", length = 500)
+    private String aadharFrontUrl;
+
+    @Column(name = "aadhar_back_url", length = 500)
+    private String aadharBackUrl;
+
+    @Column(name = "pan_number", length = 50)
+    private String panNumber;
+
+    @Column(name = "pan_front_url", length = 500)
+    private String panFrontUrl;
+
+    @Column(name = "pan_back_url", length = 500)
+    private String panBackUrl;
+
+    @Column(name = "daily_wage", length = 50)
+    private String dailyWage;
+
     @Column(name = "date_of_birth")
     private LocalDate dateOfBirth;
 

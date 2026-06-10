@@ -1,19 +1,42 @@
 package com.repairshop.saas.ticket.exception;
 
 import jakarta.servlet.http.HttpServletRequest;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 import java.time.Instant;
 import java.util.List;
 import java.util.stream.Collectors;
 
 @RestControllerAdvice
+@Slf4j
 public class GlobalExceptionHandler {
+
+    /**
+     * Spring throws this when a request hits a path that isn't mapped to any
+     * controller method (typical cause: deployed JVM doesn't have the route —
+     * either the service wasn't restarted after adding a new @PostMapping, or
+     * the mobile app is calling the wrong port). The default Exception
+     * handler used to swallow this and return an opaque 500, which made the
+     * "JVM not restarted" case impossible to diagnose from the client. Now
+     * it surfaces as a 404 that names the unmatched path.
+     */
+    @ExceptionHandler(NoResourceFoundException.class)
+    public ResponseEntity<ApiError> handleNoResource(NoResourceFoundException ex, HttpServletRequest req) {
+        String path = req.getRequestURI();
+        log.warn("404 no resource for {} {} — controller route not registered (rebuild + restart this JVM if you just added the endpoint)",
+                req.getMethod(), path);
+        return response(HttpStatus.NOT_FOUND,
+                "No handler for " + req.getMethod() + " " + path
+                        + " — verify the URL or restart this service if the endpoint was just added",
+                path);
+    }
 
     @ExceptionHandler(ResourceNotFoundException.class)
     public ResponseEntity<ApiError> handleNotFound(ResourceNotFoundException ex, HttpServletRequest req) {
@@ -62,7 +85,16 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ApiError> handleGeneric(Exception ex, HttpServletRequest req) {
-        return response(HttpStatus.INTERNAL_SERVER_ERROR, "Internal server error", req.getRequestURI());
+        // Log the full stack trace at ERROR so the operator can actually
+        // diagnose what went wrong. Previous behavior swallowed everything
+        // into an opaque "Internal server error" message, which made
+        // bugs that happened to escape a controller-local try/catch
+        // basically un-debuggable.
+        log.error("500 unhandled exception for {} {}: {}",
+                req.getMethod(), req.getRequestURI(), ex.getMessage(), ex);
+        String detail = ex.getClass().getSimpleName()
+                + (ex.getMessage() != null ? ": " + ex.getMessage() : "");
+        return response(HttpStatus.INTERNAL_SERVER_ERROR, detail, req.getRequestURI());
     }
 
     private ResponseEntity<ApiError> response(HttpStatus status, String message, String path) {

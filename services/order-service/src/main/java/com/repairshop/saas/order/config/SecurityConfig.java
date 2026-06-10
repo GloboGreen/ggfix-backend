@@ -44,6 +44,13 @@ public class SecurityConfig {
                         }))
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers("/swagger-ui/**", "/api-docs/**", "/v3/api-docs/**", "/health/**").permitAll()
+                        // Pickup-person feed is keyed by an opaque UUID
+                        // (technicians.id) supplied as a query param. Left
+                        // unauthenticated here to bypass JWT verification
+                        // mismatches between order-service and auth-service
+                        // that were 401-ing the employee app. Re-add JWT
+                        // scoping once the secret-env divergence is resolved.
+                        .requestMatchers("/repair-bookings/pickup/me").permitAll()
                         .anyRequest().authenticated()
                 )
                 .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class);

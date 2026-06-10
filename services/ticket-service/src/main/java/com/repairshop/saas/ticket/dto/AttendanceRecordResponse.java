@@ -36,4 +36,7 @@ public class AttendanceRecordResponse {
 
     @Schema(description = "Notes e.g. Permission - 1hrs")
     private String notes;
+
+    @Schema(description = "Minutes the check-in was after the technician's duty start (0 when on time or no duty time configured)")
+    private Integer lateMinutes;
 }

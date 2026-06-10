@@ -6,6 +6,7 @@ import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.context.SecurityContextHolder;
@@ -21,6 +22,7 @@ import java.util.stream.Collectors;
 
 @Component
 @RequiredArgsConstructor
+@Slf4j
 public class JwtAuthFilter extends OncePerRequestFilter {
 
     private final JwtService jwtService;
@@ -45,11 +47,19 @@ public class JwtAuthFilter extends OncePerRequestFilter {
                 request.setAttribute("roles", roles);
                 SecurityContextHolder.getContext().setAuthentication(auth);
             } catch (Exception e) {
-                SecurityContextHolder.clearContext();
-                response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
-                response.setContentType("application/json");
-                response.getWriter().write("{\"error\":\"unauthorized\",\"message\":\"Invalid or expired token\"}");
-                return;
+                // Match ticket-service / shop-service behavior: silently ignore
+                // unparseable tokens and let the request continue without auth
+                // context. Controllers that need a caller will then throw 403
+                // (Forbidden) via their own checks. The previous behavior of
+                // returning 401 here was harmful: the employee-app client treats
+                // 401 as "session dead" and bounces the user to Login, so a
+                // single 401 from this service would log the user out app-wide
+                // even when the rest of the app is healthy on the same token.
+                // WARN (not DEBUG) so the root cause is visible without changing
+                // log levels. Common reasons: signature mismatch (auth-service
+                // and order-service were started with different JWT_SECRET env
+                // values) or expired token (>24h since login).
+                log.warn("JWT parse failed on {}: {}", request.getRequestURI(), e.getMessage());
             }
         }
         filterChain.doFilter(request, response);

@@ -102,6 +102,14 @@ public class RepairBookingDtos {
         private String pickupAddressPincode;
         private String pickupAddressMobile;
         private String pickupAddressLabel;
+        // Pickup hand-off milestones (migrations 44 + 45). Surface them to
+        // the shop-owner pickup detail screen so the "Mark Received" card
+        // can render the audited timestamp + staff name without an events
+        // walk.
+        private Instant reachedShopAt;
+        private Instant receivedAtShopAt;
+        private UUID receivedByUserId;
+        private String receivedByUserName;
     }
 
     @Data @NoArgsConstructor @AllArgsConstructor @Builder

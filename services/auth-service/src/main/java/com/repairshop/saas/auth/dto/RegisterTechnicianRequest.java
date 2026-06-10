@@ -24,4 +24,7 @@ public class RegisterTechnicianRequest {
 
     @Schema(description = "Display name")
     private String name;
+
+    @Schema(description = "Role label as shown in the owner UI: Technician, Staff, or Pickup Person", example = "Pickup Person")
+    private String roleLabel;
 }

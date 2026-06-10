@@ -126,6 +126,14 @@ public class TechnicianController {
         return technicianService.create(shopId, body);
     }
 
+    @GetMapping("/{id}")
+    @Operation(summary = "Get a single technician by id (for Edit Profile hydration)")
+    public TechnicianResponse getById(@PathVariable UUID id, HttpServletRequest request) {
+        UUID shopId = shopIdFrom(request);
+        if (shopId == null) throw new IllegalStateException("Missing shop context");
+        return technicianService.getById(shopId, id);
+    }
+
     @PatchMapping("/{id}")
     @Operation(summary = "Update technician (name, role, availability)")
     public TechnicianResponse update(
@@ -254,6 +262,36 @@ public class TechnicianController {
             HttpServletRequest request) {
         UUID shopId = shopIdFrom(request);
         if (shopId == null) throw new IllegalStateException("Missing shop context");
-        return technicianService.updateLeaveStatus(shopId, id, leaveId, body);
+        return technicianService.updateLeaveStatus(shopId, id, leaveId, userIdFrom(request), body);
+    }
+
+    // Convenience aliases for the documented /approve and /reject paths so the
+    // client can hit either /leaves/{id}/approve or PATCH /leaves/{id} with a
+    // status body. Both routes funnel into the same service method.
+    @PatchMapping("/{id}/leaves/{leaveId}/approve")
+    @Operation(summary = "Approve leave request (alias for PATCH /leaves/{id} with status=APPROVED)")
+    public LeaveRequestResponse approveLeave(
+            @PathVariable UUID id,
+            @PathVariable UUID leaveId,
+            @RequestBody(required = false) LeaveStatusUpdateRequest body,
+            HttpServletRequest request) {
+        UUID shopId = shopIdFrom(request);
+        if (shopId == null) throw new IllegalStateException("Missing shop context");
+        LeaveStatusUpdateRequest patch = body != null ? body : new LeaveStatusUpdateRequest();
+        patch.setStatus("APPROVED");
+        return technicianService.updateLeaveStatus(shopId, id, leaveId, userIdFrom(request), patch);
+    }
+
+    @PatchMapping("/{id}/leaves/{leaveId}/reject")
+    @Operation(summary = "Reject leave request (alias for PATCH /leaves/{id} with status=REJECTED)")
+    public LeaveRequestResponse rejectLeave(
+            @PathVariable UUID id,
+            @PathVariable UUID leaveId,
+            @RequestBody LeaveStatusUpdateRequest body,
+            HttpServletRequest request) {
+        UUID shopId = shopIdFrom(request);
+        if (shopId == null) throw new IllegalStateException("Missing shop context");
+        body.setStatus("REJECTED");
+        return technicianService.updateLeaveStatus(shopId, id, leaveId, userIdFrom(request), body);
     }
 }

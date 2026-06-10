@@ -56,14 +56,26 @@ public class RepairBookingController {
     public ResponseEntity<RepairBookingResponse> create(HttpServletRequest req, @RequestBody RepairBookingRequest body) {
         UUID userId = customerCallerId(req);
         String bookingNumber = uniqueBookingNumber();
+        final String requestedServiceMode = body.getServiceMode() != null ? body.getServiceMode() : "PICKUP";
+        final boolean pickupMode = "PICKUP".equalsIgnoreCase(requestedServiceMode);
+        final String initialStatus = pickupMode ? "PICKUP_REQUESTED" : "ORDER_PLACED";
         BigDecimal estimateAmount = body.getServices() == null ? null :
                 body.getServices().stream()
                         .map(ServiceRow::getEstimatedPrice)
                         .filter(p -> p != null)
                         .reduce(BigDecimal.ZERO, BigDecimal::add);
+        // Denormalize customer name + mobile onto the booking row so the
+        // owner-side Bookings History and Pickup Service screens — and the
+        // mintTicketFromBooking step in ticket-service — don't have to JOIN
+        // customer_users at read time. lookupCustomerNameMobile logs on
+        // failure and returns nulls rather than throwing, so a transient
+        // customer_users hiccup never blocks a booking create.
+        String[] nameMobile = lookupCustomerNameMobile(userId);
         RepairBooking saved = bookingRepo.save(RepairBooking.builder()
                 .bookingNumber(bookingNumber)
                 .customerUserId(userId)
+                .customerName(nameMobile[0])
+                .customerMobile(nameMobile[1])
                 .shopId(body.getShopId())
                 .savedDeviceId(body.getSavedDeviceId())
                 .brandId(body.getBrandId())
@@ -71,13 +83,13 @@ public class RepairBookingController {
                 .ramOptionId(body.getRamOptionId())
                 .storageOptionId(body.getStorageOptionId())
                 .color(body.getColor())
-                .serviceMode(body.getServiceMode() != null ? body.getServiceMode() : "PICKUP")
+                .serviceMode(requestedServiceMode)
                 .frontImageUrl(body.getFrontImageUrl())
                 .backImageUrl(body.getBackImageUrl())
                 .videoUrl(body.getVideoUrl())
                 .issueSummary(body.getIssueSummary())
                 .estimateAmount(estimateAmount != null && estimateAmount.signum() > 0 ? estimateAmount : null)
-                .status("ORDER_PLACED")
+                .status(initialStatus)
                 .pickupAddressId(body.getPickupAddressId())
                 .pickupDate(body.getPickupDate())
                 .pickupSlotStart(body.getPickupSlotStart())
@@ -98,19 +110,21 @@ public class RepairBookingController {
 
         eventRepo.save(RepairBookingEvent.builder()
                 .bookingId(saved.getId())
-                .status("BOOKING_CREATED_BY_SHOP")
-                .note("Booking Created by Shop")
-                .actor("SYSTEM")
+                .status(pickupMode ? "PICKUP_REQUESTED" : "BOOKING_CREATED_BY_SHOP")
+                .note(pickupMode ? "Pickup Requested" : "Booking Created by Shop")
+                .actor(pickupMode ? "CUSTOMER" : "SYSTEM")
                 .build());
         // Creating a booking from the shop side is an implicit "service accepted"
         // step — the shop confirms they'll take the work the moment the booking
         // is saved, so the timeline lights up both rows together.
-        eventRepo.save(RepairBookingEvent.builder()
+        if (!pickupMode) {
+            eventRepo.save(RepairBookingEvent.builder()
                 .bookingId(saved.getId())
                 .status("SERVICE_ACCEPTED")
                 .note("Service Accepted")
                 .actor("SHOP")
                 .build());
+        }
 
         // Write unified customer_orders row. Map service mode → orderType so
         // a doorstep-pickup repair shows in the Pickup tab of My Orders,
@@ -154,7 +168,7 @@ public class RepairBookingController {
                 .build());
 
         // Confirm the booking to the customer in their notification feed.
-        notifyCustomer(saved, "ORDER_PLACED", "Order placed",
+        notifyCustomer(saved, initialStatus, pickupMode ? "Pickup requested" : "Order placed",
                 "Booking " + saved.getBookingNumber() + " placed - we'll keep you posted.");
 
         return ResponseEntity.ok(toResponseWithChildren(saved));
@@ -337,6 +351,40 @@ public class RepairBookingController {
         return ResponseEntity.ok(toResponseWithChildren(b));
     }
 
+    // Employee app — pickup-person's own feed. Returns every repair booking
+    // currently (or previously) assigned to the given pickup person.
+    //
+    // The client (employee app) passes the technician id from its own session
+    // (session.technicianId, already fetched via /technicians/me). Optionally
+    // narrow by `shopId` query param (also from the session) to scope across
+    // shops; if omitted, the personId alone is the key.
+    //
+    // Auth: SecurityConfig leaves this endpoint permitAll because the JWT
+    // verification was diverging from auth-service in some local setups,
+    // 401-ing the employee app. The personId is a 128-bit opaque UUID so
+    // direct enumeration isn't realistic. Re-add JWT scoping once the
+    // shared-secret setup is consistent across services.
+    @GetMapping("/pickup/me")
+    public ResponseEntity<List<RepairBookingResponse>> listMyAssignedPickups(
+            @RequestParam("personId") UUID personId,
+            @RequestParam(value = "shopId", required = false) UUID shopIdFilter,
+            @RequestParam(value = "status", required = false) String status) {
+        log.info("listMyAssignedPickups: person={} shopFilter={} status={}", personId, shopIdFilter, status);
+        List<RepairBooking> list = bookingRepo
+                .findByAssignedPickupPersonIdOrderByCreatedAtDesc(personId);
+        if (shopIdFilter != null) {
+            list = list.stream().filter(b -> shopIdFilter.equals(b.getShopId())).toList();
+        }
+        if (status != null && !status.isBlank()) {
+            String target = status.toUpperCase();
+            list = list.stream().filter(b -> target.equalsIgnoreCase(b.getStatus())).toList();
+        }
+        log.info("listMyAssignedPickups: returning {} booking(s) for person={}", list.size(), personId);
+        return ResponseEntity.ok(list.stream()
+                .map(b -> enrichCustomerFields(toResponseWithChildren(b), b))
+                .toList());
+    }
+
     // Shop owner confirms a freshly-placed pickup booking. Flips the booking
     // status from ORDER_PLACED → ORDER_SERVICE_CONFIRMED, drops a timeline
     // event the customer screen reads, and notifies the customer. Idempotent:
@@ -347,16 +395,22 @@ public class RepairBookingController {
         UUID shopId = shopCallerId(req);
         RepairBooking b = bookingRepo.findById(id).orElseThrow(() -> new ResourceNotFoundException("Booking not found"));
         if (b.getShopId() == null || !b.getShopId().equals(shopId)) throw new ForbiddenException("Not your shop's booking");
-        if (!"ORDER_SERVICE_CONFIRMED".equalsIgnoreCase(b.getStatus())) {
+        final boolean pickupMode = "PICKUP".equalsIgnoreCase(b.getServiceMode());
+        final String acceptedStatus = pickupMode ? "PICKUP_ACCEPTED" : "ORDER_SERVICE_CONFIRMED";
+        final String acceptedEvent = pickupMode ? "PICKUP_ACCEPTED" : "SERVICE_ACCEPTED";
+        final String acceptedLabel = pickupMode ? "Pickup Accepted" : "Service Accepted";
+        if (!acceptedStatus.equalsIgnoreCase(b.getStatus())
+                && !"ORDER_SERVICE_CONFIRMED".equalsIgnoreCase(b.getStatus())
+                && !"PICKUP_ACCEPTED".equalsIgnoreCase(b.getStatus())) {
             // booking macro status stays as ORDER_SERVICE_CONFIRMED — that
             // column drives downstream pickup logic. The TIMELINE event uses
             // the new SERVICE_ACCEPTED step key.
-            b.setStatus("ORDER_SERVICE_CONFIRMED");
+            b.setStatus(acceptedStatus);
             bookingRepo.save(b);
             eventRepo.save(RepairBookingEvent.builder()
-                    .bookingId(b.getId()).status("SERVICE_ACCEPTED")
-                    .note("Service Accepted").actor("SHOP").build());
-            notifyCustomer(b, "SERVICE_ACCEPTED", "Service Accepted",
+                    .bookingId(b.getId()).status(acceptedEvent)
+                    .note(acceptedLabel).actor("SHOP").build());
+            notifyCustomer(b, acceptedEvent, acceptedLabel,
                     "Booking " + b.getBookingNumber() + " - the shop confirmed your pickup request.");
         }
         return ResponseEntity.ok(toResponseWithChildren(b));
@@ -378,11 +432,13 @@ public class RepairBookingController {
         // before PICKUP_ASSIGNED. Auto-confirm so the owner can assign in a
         // single tap on a fresh booking without leaving an out-of-order timeline.
         String prevStatus = b.getStatus();
-        if ("ORDER_PLACED".equalsIgnoreCase(prevStatus)) {
+        if ("ORDER_PLACED".equalsIgnoreCase(prevStatus) || "PICKUP_REQUESTED".equalsIgnoreCase(prevStatus)) {
+            String acceptedEvent = "PICKUP".equalsIgnoreCase(b.getServiceMode()) ? "PICKUP_ACCEPTED" : "SERVICE_ACCEPTED";
+            String acceptedLabel = "PICKUP".equalsIgnoreCase(b.getServiceMode()) ? "Pickup Accepted" : "Service Accepted";
             eventRepo.save(RepairBookingEvent.builder()
-                    .bookingId(b.getId()).status("SERVICE_ACCEPTED")
-                    .note("Service Accepted").actor("SHOP").build());
-            notifyCustomer(b, "SERVICE_ACCEPTED", "Service Accepted",
+                    .bookingId(b.getId()).status(acceptedEvent)
+                    .note(acceptedLabel).actor("SHOP").build());
+            notifyCustomer(b, acceptedEvent, acceptedLabel,
                     "Booking " + b.getBookingNumber() + " - the shop confirmed your pickup request.");
         }
         boolean reassign = b.getAssignedPickupPersonId() != null
@@ -390,18 +446,30 @@ public class RepairBookingController {
         b.setAssignedPickupPersonId(body.getPickupPersonId());
         b.setPickupPersonName(body.getPickupPersonName());
         b.setPickupPersonPhone(body.getPickupPersonPhone());
-        b.setStatus("PICKUP_ASSIGNED");
+        b.setStatus("PICKUP_PERSON_ASSIGNED");
         bookingRepo.save(b);
         String displayName = body.getPickupPersonName() != null && !body.getPickupPersonName().isBlank()
                 ? body.getPickupPersonName() : "pickup agent";
         eventRepo.save(RepairBookingEvent.builder()
                 .bookingId(b.getId())
-                .status(reassign ? "PICKUP_REASSIGNED" : "PICKUP_ASSIGNED")
+                .status(reassign ? "PICKUP_REASSIGNED" : "PICKUP_PERSON_ASSIGNED")
                 .note((reassign ? "Reassigned to " : "Assigned to ") + displayName)
                 .actor("SHOP").build());
-        notifyCustomer(b, "PICKUP_ASSIGNED",
+        notifyCustomer(b, "PICKUP_PERSON_ASSIGNED",
                 reassign ? "Pickup person reassigned" : "Pickup person assigned",
                 "Booking " + b.getBookingNumber() + " - " + displayName + " will pick up your device.");
+        // Flip the customer's My Orders → Pickup card out of "PENDING" the
+        // moment a pickup agent is committed. PickupBookingController owns
+        // the same mirror for later transitions; this catches the first hop
+        // which happens entirely inside order-service.
+        customerOrderRepo.findByOrderNumber(b.getBookingNumber()).ifPresent(co -> {
+            if (!"IN_PROGRESS".equalsIgnoreCase(co.getStatus())
+                    && !"COMPLETED".equalsIgnoreCase(co.getStatus())
+                    && !"CANCELLED".equalsIgnoreCase(co.getStatus())) {
+                co.setStatus("IN_PROGRESS");
+                customerOrderRepo.save(co);
+            }
+        });
         return ResponseEntity.ok(toResponseWithChildren(b));
     }
 
@@ -527,6 +595,10 @@ public class RepairBookingController {
                 .assignedPickupPersonId(b.getAssignedPickupPersonId())
                 .pickupPersonName(b.getPickupPersonName())
                 .pickupPersonPhone(b.getPickupPersonPhone())
+                .reachedShopAt(b.getReachedShopAt())
+                .receivedAtShopAt(b.getReceivedAtShopAt())
+                .receivedByUserId(b.getReceivedByUserId())
+                .receivedByUserName(b.getReceivedByUserName())
                 .createdAt(b.getCreatedAt()).updatedAt(b.getUpdatedAt())
                 .build();
     }

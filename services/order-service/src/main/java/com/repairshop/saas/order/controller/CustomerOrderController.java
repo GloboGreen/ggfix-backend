@@ -73,9 +73,21 @@ public class CustomerOrderController {
         m.put("CANCELLED",                                     "Work Cancelled");
         // Pickup-flow keys emitted by /confirm-order and /assign-pickup. Kept
         // in this map so the My Orders Pickup tab also gets a human label.
+        m.put("PICKUP_REQUESTED",                            "Pickup Requested");
+        m.put("PICKUP_ACCEPTED",                             "Pickup Accepted");
+        m.put("PICKUP_PERSON_ASSIGNED",                      "Pickup person assigned");
         m.put("ORDER_SERVICE_CONFIRMED",                       "Service Accepted");
         m.put("PICKUP_ASSIGNED",                               "Pickup person assigned");
         m.put("PICKUP_REASSIGNED",                             "Pickup person reassigned");
+        m.put("PICKUP_ON_THE_WAY",                             "Pickup person on the way");
+        m.put("REPAIR_ESTIMATE_PROCESSING",                    "Repair estimate processing");
+        m.put("ESTIMATE_SUBMITTED",                            "Estimate submitted");
+        m.put("DEVICE_PICKED_UP",                              "Device picked up");
+        m.put("PICKED_UP",                                     "Device picked up");
+        m.put("REACHED_SHOP",                                  "Reached shop");
+        m.put("ESTIMATE_SENT_TO_CUSTOMER",                     "Estimate sent to customer");
+        m.put("REPAIR_IN_PROGRESS",                            "Repair in progress");
+        m.put("READY_FOR_DELIVERY",                            "Ready for delivery");
         m.put("ORDER_PLACED",                                  "Booking Placed");
         PHASE_LABELS = java.util.Collections.unmodifiableMap(m);
     }
