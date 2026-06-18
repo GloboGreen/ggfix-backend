@@ -36,8 +36,23 @@ public class Ticket {
     @Column(name = "customer_phone", length = 30)
     private String customerPhone;
 
+    /** Single-line postal text snapshot of the pickup address (or shop-side
+     *  walk-in address). Snapshot — not an FK — so the owner Booking Details
+     *  screen can render the address without joining customer_addresses, and
+     *  the row survives if the customer later deletes the saved address. */
+    @Column(name = "customer_address", columnDefinition = "TEXT")
+    private String customerAddress;
+
     @Column(name = "assigned_technician_id")
     private UUID assignedTechnicianId;
+
+    /** Timestamp of the assigned technician's explicit Accept action. NULL
+     *  while the ticket is waiting in the technician's "Re-Assign" bucket;
+     *  set to now() by POST /tickets/{id}/accept. Reset to NULL whenever
+     *  assigned_technician_id changes (assign + reassign) so the new
+     *  technician sees the Accept button in their queue. */
+    @Column(name = "technician_accepted_at")
+    private java.time.Instant technicianAcceptedAt;
 
     @Column(name = "tracking_id", nullable = false, length = 50)
     private String trackingId;
@@ -71,6 +86,13 @@ public class Ticket {
 
     @Column(name = "issue_description", columnDefinition = "TEXT")
     private String issueDescription;
+
+    /** Cloudinary URL for the customer's voice-note recording of the issue.
+     *  The shop-app's "Review & Confirm" screen records via expo-av and uploads
+     *  to /media/upload (folder=complaint-audio) before submitting the ticket.
+     *  Migration 57 added this column. */
+    @Column(name = "issue_audio_url", columnDefinition = "TEXT")
+    private String issueAudioUrl;
 
     /**
      * Short, human-friendly name for the device, used directly by mobile UIs.

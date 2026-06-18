@@ -37,6 +37,12 @@ public class RepairNote {
     @Column(name = "is_internal")
     private Boolean isInternal;
 
+    @Column(name = "audio_url", columnDefinition = "TEXT")
+    private String audioUrl;
+
+    @Column(name = "images_json", columnDefinition = "TEXT")
+    private String imagesJson;
+
     @Column(name = "created_at", insertable = false, updatable = false)
     private Instant createdAt;
 

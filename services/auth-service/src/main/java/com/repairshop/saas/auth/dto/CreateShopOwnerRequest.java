@@ -90,5 +90,11 @@ public class CreateShopOwnerRequest {
         private String workingDays;   // MON_FRI | MON_SAT | MON_SUN
         private String openingTime;   // e.g. "08:00 AM"
         private String closingTime;   // e.g. "07:00 PM"
+
+        /**
+         * JSON payload of "what this shop repairs" — see Shop.serviceCategoriesJson.
+         * Round-tripped opaquely so the client owns the shape.
+         */
+        private String serviceCategoriesJson;
     }
 }

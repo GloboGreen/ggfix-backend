@@ -38,16 +38,23 @@ public class CustomerOrderMirrorService {
     private final PlatformCustomerNotificationRepository notificationRepo;
     private final ObjectMapper objectMapper;
 
-    /** Ticket-side status → (booking.status, customer_order.status). */
-    private static final Map<String, String[]> STATUS_MAP = Map.of(
-            "CREATED",      new String[]{"ORDER_PLACED",     "PENDING"},
-            "IN_DIAGNOSIS", new String[]{"IN_DIAGNOSIS",     "PENDING"},
-            "QUOTED",       new String[]{"QUOTED",           "PENDING"},
-            "APPROVED",     new String[]{"SERVICE_ACCEPTED", "PENDING"},
-            "IN_REPAIR",    new String[]{"IN_REPAIR",        "PENDING"},
-            "READY",        new String[]{"READY",            "PENDING"},
-            "DELIVERED",    new String[]{"DELIVERED",        "COMPLETED"},
-            "CANCELLED",    new String[]{"CANCELLED",        "CANCELLED"}
+    /** Ticket-side status → (booking.status, customer_order.status).
+     *  customer_order.status stays PENDING through the post-READY billing /
+     *  handover substages (INVOICE_GENERATED, INVOICE_READY,
+     *  DELIVERED_PROCESSING) and only flips to COMPLETED when the device is
+     *  physically delivered. */
+    private static final Map<String, String[]> STATUS_MAP = Map.ofEntries(
+            Map.entry("CREATED",              new String[]{"ORDER_PLACED",         "PENDING"}),
+            Map.entry("IN_DIAGNOSIS",         new String[]{"IN_DIAGNOSIS",         "PENDING"}),
+            Map.entry("QUOTED",               new String[]{"QUOTED",               "PENDING"}),
+            Map.entry("APPROVED",             new String[]{"SERVICE_ACCEPTED",     "PENDING"}),
+            Map.entry("IN_REPAIR",            new String[]{"IN_REPAIR",            "PENDING"}),
+            Map.entry("READY",                new String[]{"READY",                "PENDING"}),
+            Map.entry("INVOICE_GENERATED",    new String[]{"INVOICE_GENERATED",    "PENDING"}),
+            Map.entry("INVOICE_READY",        new String[]{"INVOICE_READY",        "PENDING"}),
+            Map.entry("DELIVERED_PROCESSING", new String[]{"DELIVERED_PROCESSING", "PENDING"}),
+            Map.entry("DELIVERED",            new String[]{"DELIVERED",            "COMPLETED"}),
+            Map.entry("CANCELLED",            new String[]{"CANCELLED",            "CANCELLED"})
     );
 
     /** Ticket statuses that imply the technician has actively picked the job up.
@@ -57,6 +64,123 @@ public class CustomerOrderMirrorService {
             "IN_DIAGNOSIS", "IN_REPAIR", "QUOTED", "APPROVED", "READY", "DELIVERED"
     );
 
+    /** Customer notification templates keyed by the step-event status. Only
+     * statuses present here trigger a customer-facing notification — for
+     * everything else we still write the timeline event but stay silent on
+     * the customer's Notifications screen. The body has a single "%s" slot
+     * for the booking number. Restricting this map is what keeps the screen
+     * useful (one row per real-life update) instead of one ping per emit.
+     */
+    private static final java.util.Map<String, String[]> CUSTOMER_NOTIFICATION_TEMPLATES =
+            java.util.Map.ofEntries(
+                    java.util.Map.entry("ASSIGNED_TO_TECHNICIAN",
+                            new String[]{"Technician assigned",
+                                    "We've assigned a technician to your booking %s."}),
+                    java.util.Map.entry("REASSIGNED_TO_TECHNICIAN",
+                            new String[]{"Technician re-assigned",
+                                    "A new technician is now handling your booking %s."}),
+                    java.util.Map.entry("TECHNICIAN_ACCEPTED_SERVICE",
+                            new String[]{"Technician accepted",
+                                    "Your technician has accepted the service for booking %s."}),
+                    java.util.Map.entry("TECHNICIAN_WORK_STARTED",
+                            new String[]{"Repair started",
+                                    "Work has begun on your booking %s."}),
+                    java.util.Map.entry("TECHNICIAN_UPLOADED_DEVICE_IMAGES",
+                            new String[]{"Device photos added",
+                                    "Your technician uploaded photos of your device for booking %s."}),
+                    java.util.Map.entry("TECHNICIAN_COMPLIANCE_ISSUE_VERIFIED_UPDATED",
+                            new String[]{"Issue verified",
+                                    "Your technician has verified the issue on booking %s."}),
+                    java.util.Map.entry("REPAIR_COMPLETED",
+                            new String[]{"Repair completed",
+                                    "The repair for booking %s is complete."}),
+                    java.util.Map.entry("READY",
+                            new String[]{"Ready for delivery",
+                                    "Your booking %s is ready. We'll hand it over shortly."}),
+                    java.util.Map.entry("READY_FOR_DELIVERY",
+                            new String[]{"Ready for delivery",
+                                    "Your booking %s is ready for delivery."}),
+                    java.util.Map.entry("INVOICE_GENERATED",
+                            new String[]{"Invoice generated",
+                                    "An invoice has been generated for booking %s."}),
+                    java.util.Map.entry("DELIVERED",
+                            new String[]{"Delivered",
+                                    "Your device for booking %s has been delivered. Enjoy!"}),
+                    java.util.Map.entry("CANCELLED",
+                            new String[]{"Booking cancelled",
+                                    "Your booking %s has been cancelled."}),
+                    // Pickup flow updates
+                    java.util.Map.entry("PICKUP_PERSON_ASSIGNED",
+                            new String[]{"Pickup partner assigned",
+                                    "A pickup partner has been assigned to booking %s."}),
+                    java.util.Map.entry("PICKUP_ON_THE_WAY",
+                            new String[]{"Pickup partner on the way",
+                                    "Your pickup partner is heading to you for booking %s."}),
+                    java.util.Map.entry("REACHED_CUSTOMER_LOCATION",
+                            new String[]{"Pickup partner arrived",
+                                    "Your pickup partner has arrived for booking %s."}),
+                    java.util.Map.entry("DEVICE_PICKED_UP",
+                            new String[]{"Device picked up",
+                                    "Your device for booking %s has been picked up."}),
+                    java.util.Map.entry("REACHED_SHOP",
+                            new String[]{"Device reaching the shop",
+                                    "Your device is on its way back to the shop for booking %s."}),
+                    java.util.Map.entry("RECEIVED_AT_SHOP",
+                            new String[]{"Device received at shop",
+                                    "Your device has reached the shop for booking %s."})
+            );
+
+    /**
+     * Emit a customer-facing notification for a fresh timeline event. Called
+     * from every step-event save site after the row commits so the customer
+     * sees one Notifications row per real-life update instead of just the
+     * initial "Service booking created" entry.
+     *
+     * Silently skips when:
+     *   * the booking has no platform customer linked (walk-in flow)
+     *   * the status isn't in CUSTOMER_NOTIFICATION_TEMPLATES — keeps low-signal
+     *     transitions (e.g., AWAITING_TECHNICIAN_ACCEPTANCE) off the screen
+     *
+     * Runs in REQUIRES_NEW so a notification-save failure can't poison the
+     * outer event-save transaction.
+     */
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void emitCustomerNotificationForStatus(UUID bookingId, String statusKey) {
+        if (bookingId == null || statusKey == null) return;
+        String[] template = CUSTOMER_NOTIFICATION_TEMPLATES.get(statusKey.toUpperCase());
+        if (template == null) return;
+        bookingRepo.findById(bookingId).ifPresent(booking -> {
+            UUID userId = booking.getCustomerUserId();
+            if (userId == null) return; // walk-in: no app account to notify
+            String bookingNumber = booking.getBookingNumber() != null
+                    ? booking.getBookingNumber()
+                    : "";
+            notificationRepo.save(PlatformCustomerNotification.builder()
+                    .customerUserId(userId)
+                    .bookingId(booking.getId())
+                    .bookingNumber(bookingNumber)
+                    .statusKey(statusKey)
+                    .title(template[0])
+                    .body(String.format(template[1], bookingNumber))
+                    .type("orders")
+                    .isRead(false)
+                    .build());
+        });
+    }
+
+    /** Inline variant — runs in the CALLER'S transaction so it can see a ticket
+     *  the caller has just saved-and-flushed but not yet committed. Used by
+     *  TicketService.create / update where the ticket and the mirror MUST land
+     *  atomically: without this, the booking INSERT runs in a fresh transaction
+     *  that can't see the ticket and the FK constraint
+     *  repair_bookings_ticket_id_fkey fails. Read-path callers should keep
+     *  using {@link #mirrorOnUpsert(Ticket)} which preserves the swallow-
+     *  failure semantics they rely on. */
+    @Transactional(propagation = Propagation.REQUIRED)
+    public void mirrorOnUpsertInline(Ticket ticket) {
+        doMirror(ticket);
+    }
+
     /** Insert (or update) the platform-side booking + customer order for a ticket.
      *  Runs in its OWN transaction (REQUIRES_NEW) so that read-path callers like
      *  TicketService.getEventsForShop can swallow a mirror failure without the
@@ -64,6 +188,10 @@ public class CustomerOrderMirrorService {
      *  events read would throw UnexpectedRollbackException. */
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     public void mirrorOnUpsert(Ticket ticket) {
+        doMirror(ticket);
+    }
+
+    private void doMirror(Ticket ticket) {
         // platformUserId may be null for walk-in customers. We still create
         // the booking row (with customer_user_id null) so the timeline rail
         // and owner-side history work; the customer-facing feed mirror
@@ -116,6 +244,13 @@ public class CustomerOrderMirrorService {
         booking.setFrontImageUrl(photos.get("front"));
         booking.setBackImageUrl(photos.get("back"));
         booking.setVideoUrl(photos.get("video"));
+        // Copy the technician's post-acceptance photos onto the booking row.
+        // Ticket-side storage is a JSON array; booking-side is CSV — the
+        // order-service RepairBookingResponse splits the CSV back to a list
+        // for the customer detail screen. Skipping this sync was why the
+        // customer's "Technician Photos" card stayed empty even when the
+        // owner could see the uploads.
+        booking.setTechnicianPhotos(joinTechnicianPhotosForBooking(ticket.getTechnicianPhotosJson()));
         booking.setStatus(bookingStatus);
         booking = bookingRepo.save(booking);
 
@@ -123,7 +258,8 @@ public class CustomerOrderMirrorService {
                 ticket.getRepairServicesSummary());
 
         emitTimelineEvents(booking.getId(), isNew, prevBookingStatus, bookingStatus,
-                newTechId, tech, upper(ticket.getStatus()));
+                newTechId, tech, upper(ticket.getStatus()),
+                ticket.getTechnicianAcceptedAt() != null);
 
         // Customer-side feed (My Orders) + notifications only apply when the
         // customer has a platform_user_id link. Walk-in tickets stop here —
@@ -177,7 +313,8 @@ public class CustomerOrderMirrorService {
     private void emitTimelineEvents(UUID bookingId, boolean isNew,
                                     String prevBookingStatus, String bookingStatus,
                                     UUID newTechId,
-                                    Technician tech, String ticketStatus) {
+                                    Technician tech, String ticketStatus,
+                                    boolean technicianAccepted) {
         if (isNew) {
             bookingEventRepo.save(PlatformRepairBookingEvent.builder()
                     .bookingId(bookingId).status("BOOKING_CREATED_BY_SHOP")
@@ -187,6 +324,10 @@ public class CustomerOrderMirrorService {
             bookingEventRepo.save(PlatformRepairBookingEvent.builder()
                     .bookingId(bookingId).status("SERVICE_ACCEPTED")
                     .note("Service Accepted").actor("SHOP").build());
+            // BOOKING_CREATED_BY_SHOP already has its own dedicated notification
+            // (the doMirror isNew branch fires the "Service booking created"
+            // message) so we don't re-notify here. SERVICE_ACCEPTED is silent
+            // by design — bundled with the creation moment.
         } else if (prevBookingStatus != null && !prevBookingStatus.equals(bookingStatus)) {
             // Booking macro status actually changed — emit the corresponding
             // step event from the SHOP_BOOKING_STATUS_OPTIONS list when there
@@ -197,6 +338,7 @@ public class CustomerOrderMirrorService {
             if (stepKey != null) {
                 bookingEventRepo.save(PlatformRepairBookingEvent.builder()
                         .bookingId(bookingId).status(stepKey).actor("SHOP").build());
+                emitCustomerNotificationForStatus(bookingId, stepKey);
             }
         }
 
@@ -215,10 +357,13 @@ public class CustomerOrderMirrorService {
                 bookingEventRepo.save(PlatformRepairBookingEvent.builder()
                         .bookingId(bookingId).status("ASSIGNED_TO_TECHNICIAN")
                         .note("Assigned to " + techName).actor("SHOP").build());
+                emitCustomerNotificationForStatus(bookingId, "ASSIGNED_TO_TECHNICIAN");
             }
             // Each (re)assignment puts the booking back into a not-accepted
             // state; emit once so the customer sees the awaiting-acceptance
-            // step light up with a timestamp.
+            // step light up with a timestamp. The notification map deliberately
+            // skips AWAITING_TECHNICIAN_ACCEPTANCE — it's intermediate noise
+            // for the customer.
             if (!hasNotAccepted) {
                 bookingEventRepo.save(PlatformRepairBookingEvent.builder()
                         .bookingId(bookingId).status("AWAITING_TECHNICIAN_ACCEPTANCE")
@@ -226,7 +371,14 @@ public class CustomerOrderMirrorService {
             }
         }
 
-        if (newTechId != null && ACCEPTED_TICKET_STATUSES.contains(ticketStatus)) {
+        // Acceptance source of truth is now tickets.technician_accepted_at,
+        // set by the technician's explicit POST /tickets/{id}/accept. Only
+        // emit the customer-side ACCEPTED / WORK_STARTED rows when that
+        // timestamp is non-null; the prior ACCEPTED_TICKET_STATUSES heuristic
+        // inferred acceptance from the ticket lifecycle status and auto-fired
+        // these rows the moment the owner assigned a technician, which made
+        // the technician's queue show the task as already-accepted.
+        if (newTechId != null && technicianAccepted) {
             List<PlatformRepairBookingEvent> existing =
                     bookingEventRepo.findByBookingIdOrderByCreatedAtAsc(bookingId);
             boolean hasAccepted = existing.stream().anyMatch(
@@ -236,11 +388,15 @@ public class CustomerOrderMirrorService {
             if (!hasAccepted) {
                 bookingEventRepo.save(PlatformRepairBookingEvent.builder()
                         .bookingId(bookingId).status("TECHNICIAN_ACCEPTED_SERVICE")
-                        .note(techName + " accepted the service").actor("SHOP").build());
+                        .note(techName + " accepted the service").actor("TECHNICIAN").build());
+                emitCustomerNotificationForStatus(bookingId, "TECHNICIAN_ACCEPTED_SERVICE");
             }
             // Accepting the service immediately implies the technician has
             // picked the job up and started work — emit alongside so the
-            // two rows on the timeline share the same moment.
+            // two rows on the timeline share the same moment. We deliberately
+            // skip the customer notification here so accept + start don't
+            // produce two pings back-to-back; the "Technician accepted"
+            // message covers both.
             if (!hasWorkStarted) {
                 bookingEventRepo.save(PlatformRepairBookingEvent.builder()
                         .bookingId(bookingId).status("TECHNICIAN_WORK_STARTED")
@@ -304,6 +460,33 @@ public class CustomerOrderMirrorService {
                 }
             }
             return labels.isEmpty() ? null : String.join(", ", labels);
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    /** Convert tickets.technician_photos_json (JSON array of URLs, or [{url}, ...])
+     *  into the CSV format the booking-side technician_photos column stores.
+     *  Returns null for empty / invalid input so a re-mirror without photos
+     *  doesn't overwrite an existing CSV with an empty string. */
+    private String joinTechnicianPhotosForBooking(String json) {
+        if (json == null || json.isBlank()) return null;
+        try {
+            List<Object> items = objectMapper.readValue(json, new TypeReference<List<Object>>() {});
+            if (items == null || items.isEmpty()) return null;
+            List<String> urls = new java.util.ArrayList<>();
+            for (Object it : items) {
+                String url = null;
+                if (it instanceof String s) url = s;
+                else if (it instanceof Map<?, ?> m) {
+                    Object v = m.get("url");
+                    if (v == null) v = m.get("uri");
+                    if (v == null) v = m.get("imageUrl");
+                    if (v != null) url = v.toString();
+                }
+                if (url != null && !url.isBlank()) urls.add(url);
+            }
+            return urls.isEmpty() ? null : String.join(",", urls);
         } catch (Exception ignored) {
             return null;
         }

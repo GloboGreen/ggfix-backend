@@ -25,6 +25,9 @@ public class CustomerRequest {
     @Schema(description = "Phone number", required = true)
     private String phone;
 
+    @Schema(description = "Optional customer ID proof document URL")
+    private String idProofUrl;
+
     @Schema(description = "Concatenated address (legacy field). When the structured fields below are provided they take precedence.")
     private String address;
 

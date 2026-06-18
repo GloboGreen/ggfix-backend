@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.repairshop.saas.order.dto.RepairBookingDtos.*;
 import com.repairshop.saas.order.entity.CustomerNotification;
 import com.repairshop.saas.order.entity.CustomerOrder;
+import com.repairshop.saas.order.entity.ShopNotification;
 import com.repairshop.saas.order.entity.PlatformTicket;
 import com.repairshop.saas.order.entity.RepairBooking;
 import com.repairshop.saas.order.entity.RepairBookingEvent;
@@ -44,6 +45,7 @@ public class RepairBookingController {
     private final RepairBookingEventRepository eventRepo;
     private final CustomerOrderRepository customerOrderRepo;
     private final com.repairshop.saas.order.repository.CustomerNotificationRepository notificationRepo;
+    private final com.repairshop.saas.order.repository.ShopNotificationRepository shopNotificationRepo;
     private final com.repairshop.saas.order.repository.PlatformTicketRepository platformTicketRepo;
     // Direct JDBC for customer + address enrichment — bypasses Hibernate entity
     // scanning so this works regardless of whether new @Entity classes are
@@ -170,6 +172,12 @@ public class RepairBookingController {
         // Confirm the booking to the customer in their notification feed.
         notifyCustomer(saved, initialStatus, pickupMode ? "Pickup requested" : "Order placed",
                 "Booking " + saved.getBookingNumber() + " placed - we'll keep you posted.");
+        // Alert the shop owner that a new booking has landed.
+        String shopTitle = pickupMode ? "New pickup request" : "New booking received";
+        String shopBody = "Booking " + saved.getBookingNumber()
+                + (nameMobile[0] != null ? " from " + nameMobile[0] : "")
+                + " - tap to view details.";
+        notifyShop(saved, initialStatus, shopTitle, shopBody);
 
         return ResponseEntity.ok(toResponseWithChildren(saved));
     }
@@ -512,6 +520,9 @@ public class RepairBookingController {
                 .note("Customer Approved").actor("USER").build());
         notifyCustomer(b, "CUSTOMER_APPROVED", "Customer Approved",
                 "You approved the repair estimate for booking " + b.getBookingNumber() + ".");
+        notifyShop(b, "CUSTOMER_APPROVED", "Customer approved the estimate",
+                (b.getCustomerName() != null ? b.getCustomerName() : "Customer")
+                        + " approved the estimate for booking " + b.getBookingNumber() + ".");
         return ResponseEntity.ok(toResponseWithChildren(b));
     }
 
@@ -532,6 +543,10 @@ public class RepairBookingController {
         });
         notifyCustomer(b, "CANCELLED", "Booking cancelled",
                 "Booking " + b.getBookingNumber() + " was cancelled.");
+        notifyShop(b, "CANCELLED", "Booking cancelled by customer",
+                "Booking " + b.getBookingNumber()
+                        + (b.getCustomerName() != null ? " (" + b.getCustomerName() + ")" : "")
+                        + " was cancelled by the customer.");
         return ResponseEntity.ok(toResponseWithChildren(b));
     }
 
@@ -545,6 +560,22 @@ public class RepairBookingController {
                 .title(title)
                 .body(body)
                 .type("orders")
+                .read(false)
+                .build());
+    }
+
+    // Mirror notification for the shop owner's feed. No-op when the booking
+    // has no shopId yet (customer-initiated pickup before a shop accepts).
+    private void notifyShop(RepairBooking b, String statusKey, String title, String body) {
+        if (b.getShopId() == null) return;
+        shopNotificationRepo.save(ShopNotification.builder()
+                .shopId(b.getShopId())
+                .bookingId(b.getId())
+                .bookingNumber(b.getBookingNumber())
+                .statusKey(statusKey)
+                .title(title)
+                .body(body)
+                .type("bookings")
                 .read(false)
                 .build());
     }
@@ -651,18 +682,61 @@ public class RepairBookingController {
 
     private RepairBookingResponse toResponseWithChildren(RepairBooking b) {
         RepairBookingResponse r = toResponse(b);
-        r.setServices(serviceRepo.findByBookingId(b.getId()).stream()
-                .map(s -> ServiceRow.builder()
-                        .repairServiceId(s.getRepairServiceId())
-                        .serviceCode(s.getServiceCode())
-                        .serviceName(s.getServiceName())
-                        .estimatedPrice(s.getEstimatedPrice())
-                        .build()).toList());
+        // Dedupe by repair_service_id (or by name when the row was never linked
+        // to a master service). The customer-flow → pickup-estimate sequence
+        // can land the same issue twice in repair_booking_services when the
+        // employee app re-submits rows that already existed; without this
+        // guard the customer's Receipt + Invoice rendered each service twice.
+        // When duplicates exist, prefer the row that carries a real estimated
+        // price (customer-side rows store null prices and let estimate_amount
+        // hold the bundle total).
+        java.util.LinkedHashMap<String, ServiceRow> deduped = new java.util.LinkedHashMap<>();
+        for (RepairBookingService s : serviceRepo.findByBookingId(b.getId())) {
+            String key = s.getRepairServiceId() != null
+                    ? s.getRepairServiceId().toString()
+                    : s.getServiceName() != null
+                            ? "name:" + s.getServiceName().toLowerCase()
+                            : "row:" + s.getId();
+            ServiceRow existing = deduped.get(key);
+            BigDecimal price = s.getEstimatedPrice();
+            boolean incomingHasPrice = price != null && price.signum() > 0;
+            boolean existingHasPrice = existing != null
+                    && existing.getEstimatedPrice() != null
+                    && existing.getEstimatedPrice().signum() > 0;
+            if (existing != null && (existingHasPrice || !incomingHasPrice)) continue;
+            deduped.put(key, ServiceRow.builder()
+                    .repairServiceId(s.getRepairServiceId())
+                    .serviceCode(s.getServiceCode())
+                    .serviceName(s.getServiceName())
+                    .estimatedPrice(price)
+                    .build());
+        }
+        r.setServices(new java.util.ArrayList<>(deduped.values()));
         r.setEvents(eventRepo.findByBookingIdOrderByCreatedAtAsc(b.getId()).stream()
                 .map(e -> RepairBookingEventResp.builder()
-                        .id(e.getId()).status(e.getStatus()).note(e.getNote()).actor(e.getActor()).createdAt(e.getCreatedAt())
+                        .id(e.getId()).status(e.getStatus()).note(e.getNote()).actor(e.getActor())
+                        .audioUrl(e.getAudioUrl())
+                        .imageUrls(parseImagesJson(e.getImagesJson()))
+                        .createdAt(e.getCreatedAt())
                         .build()).toList());
         return r;
+    }
+
+    // Re-hydrate the images_json TEXT column (stored as ["url", ...]) into
+    // a List<String> the customer-facing event DTO can carry directly.
+    private static List<String> parseImagesJson(String raw) {
+        if (raw == null || raw.isBlank()) return java.util.Collections.emptyList();
+        try {
+            List<?> parsed = new com.fasterxml.jackson.databind.ObjectMapper()
+                    .readValue(raw, List.class);
+            List<String> urls = new java.util.ArrayList<>();
+            for (Object o : parsed) {
+                if (o != null) urls.add(o.toString());
+            }
+            return urls;
+        } catch (Exception ignored) {
+            return java.util.Collections.emptyList();
+        }
     }
 
     private String uniqueBookingNumber() {

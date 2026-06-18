@@ -147,6 +147,17 @@ public class TicketController {
         ticketService.updateStatus(shopId, id, status);
     }
 
+    @PostMapping("/{id}/accept")
+    @Operation(summary = "Assigned technician accepts the ticket and starts work")
+    public TicketResponse acceptByTechnician(
+            @PathVariable UUID id,
+            HttpServletRequest request) {
+        UUID shopId = shopIdFrom(request);
+        UUID userId = userIdFrom(request);
+        if (shopId == null || userId == null) throw new IllegalStateException("Missing auth context");
+        return ticketService.acceptByTechnician(shopId, userId, id);
+    }
+
     // ---------- Repair notes ----------------------------------------------
 
     @PostMapping("/{id}/notes")

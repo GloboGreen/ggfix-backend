@@ -493,6 +493,40 @@ public class TechnicianService {
                 .collect(Collectors.toList());
     }
 
+    /**
+     * Generic shop-wide leave list filtered by a status. Backs the
+     * Approved / Rejected (and any future) tabs on the owner Leave Requests
+     * screen. Null/blank status returns every leave the shop's technicians
+     * have ever filed — order is "most recently requested first".
+     */
+    @Transactional(readOnly = true)
+    public List<LeaveRequestResponse> listLeavesForShopByStatus(UUID shopId, String status) {
+        List<Technician> technicians = technicianRepository.findByShopIdOrderByNameAsc(shopId);
+        if (technicians.isEmpty()) return new ArrayList<>();
+        List<UUID> techIds = technicians.stream().map(Technician::getId).collect(Collectors.toList());
+        java.util.Map<UUID, String> nameByTechId = technicians.stream().collect(
+                Collectors.toMap(Technician::getId, t -> t.getName() != null ? t.getName() : "—"));
+
+        List<TechnicianLeave> rows = new ArrayList<>();
+        if (status == null || status.isBlank()) {
+            // No filter — every leave the shop's technicians have ever filed.
+            for (String s : new String[] { "PENDING", "PROCESSING", "APPROVED", "REJECTED" }) {
+                rows.addAll(leaveRepository.findByTechnicianIdInAndStatusOrderByRequestedAtDesc(techIds, s));
+            }
+        } else {
+            String norm = status.trim().toUpperCase();
+            rows.addAll(leaveRepository.findByTechnicianIdInAndStatusOrderByRequestedAtDesc(techIds, norm));
+            // Legacy alias: rows written before migration 46 stored PENDING as
+            // PROCESSING. Keep PENDING tab inclusive.
+            if ("PENDING".equals(norm)) {
+                rows.addAll(leaveRepository.findByTechnicianIdInAndStatusOrderByRequestedAtDesc(techIds, "PROCESSING"));
+            }
+        }
+        return rows.stream()
+                .map(l -> toLeaveResponse(l, nameByTechId.getOrDefault(l.getTechnicianId(), "—")))
+                .collect(Collectors.toList());
+    }
+
     private PayslipResponse buildPayslip(Technician t, int month, int year) {
         LocalDate start = LocalDate.of(year, month, 1);
         LocalDate end = start.withDayOfMonth(start.lengthOfMonth());

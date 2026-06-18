@@ -23,6 +23,8 @@ public class PickupShopView {
     private String district;
     private String state;
     private String pincode;
+    private String gstNumber;       // exposed so the Deliver Invoice "FROM" block
+                                    // can render the shop's GSTIN when present.
     private BigDecimal latitude;
     private BigDecimal longitude;
     private String frontImageUrl;

@@ -14,6 +14,8 @@ import com.repairshop.saas.ticket.entity.Ticket;
 import com.repairshop.saas.ticket.entity.TicketSolutionPack;
 import com.repairshop.saas.ticket.exception.ResourceNotFoundException;
 import com.repairshop.saas.ticket.repository.MasterTechnicianWorkStatusViewRepository;
+import com.repairshop.saas.ticket.repository.PlatformCustomerAddressRepository;
+import com.repairshop.saas.ticket.repository.PlatformCustomerUserRepository;
 import com.repairshop.saas.ticket.repository.PlatformRepairBookingEventRepository;
 import com.repairshop.saas.ticket.repository.PlatformRepairBookingRepository;
 import com.repairshop.saas.ticket.repository.RepairNoteRepository;
@@ -30,6 +32,9 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 
+import java.time.Instant;
+import java.math.BigDecimal;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -46,6 +51,8 @@ public class TicketService {
     private final TechnicianRepository technicianRepository;
     private final PlatformRepairBookingRepository platformRepairBookingRepository;
     private final PlatformRepairBookingEventRepository platformRepairBookingEventRepository;
+    private final PlatformCustomerAddressRepository platformCustomerAddressRepository;
+    private final PlatformCustomerUserRepository platformCustomerUserRepository;
     private final RepairNoteRepository repairNoteRepository;
     private final TicketSolutionPackRepository ticketSolutionPackRepository;
     private final MasterTechnicianWorkStatusViewRepository masterWorkStatusRepository;
@@ -62,8 +69,15 @@ public class TicketService {
         // step events have no booking_id to attach to. Run the mirror first
         // so it creates the booking + the lifecycle events; then sync fills
         // in any step events implied by current ticket state.
-        customerOrderMirrorService.mirrorOnUpsert(t);
-        syncStepEventsFromTicketState(t);
+        //
+        // Errors are caught + logged: the ticket-detail screen fires this
+        // read in parallel with getEventsForShop, and both call mirrorOnUpsert
+        // in REQUIRES_NEW transactions. A transient race (optimistic lock)
+        // must not break the primary read — the next mirror run will heal it.
+        try { customerOrderMirrorService.mirrorOnUpsert(t); }
+        catch (Exception e) { log.error("mirrorOnUpsert failed for ticket {}", id, e); }
+        try { syncStepEventsFromTicketState(t); }
+        catch (Exception e) { log.error("syncStepEventsFromTicketState failed for ticket {}", id, e); }
         return toResponse(t);
     }
 
@@ -95,6 +109,8 @@ public class TicketService {
                                 .status(e.getStatus())
                                 .note(e.getNote())
                                 .actor(e.getActor())
+                                .audioUrl(e.getAudioUrl())
+                                .imageUrls(parseImagesJson(e.getImagesJson()))
                                 .createdAt(e.getCreatedAt())
                                 .build())
                         .toList())
@@ -130,7 +146,7 @@ public class TicketService {
                 .anyMatch(n -> !Boolean.TRUE.equals(n.getIsInternal()));
         if (hasComplianceNote) {
             emitBookingEvent(t.getId(), "TECHNICIAN_COMPLIANCE_ISSUE_VERIFIED_UPDATED",
-                    "Technician Compliance Issue Verified & Updated", "TECHNICIAN");
+                    "Technician Issue Verified & Updated", "TECHNICIAN");
         }
         boolean hasNewSolutionPack = !ticketSolutionPackRepository
                 .findByTicketIdAndPackTypeOrderByCreatedAtDesc(t.getId(), "NEW").isEmpty();
@@ -217,6 +233,7 @@ public class TicketService {
                 .color(request.getColor())
                 .imei(request.getImei())
                 .issueDescription(request.getIssueDescription())
+                .issueAudioUrl(request.getIssueAudioUrl())
                 .estimatedPrice(request.getEstimatedPrice())
                 .deviceDisplayName(request.getDeviceDisplayName())
                 .deviceImageUrl(request.getDeviceImageUrl())
@@ -232,8 +249,14 @@ public class TicketService {
                 .trackingId(trackingId)
                 .status("CREATED")
                 .build();
-        ticket = ticketRepository.save(ticket);
-        customerOrderMirrorService.mirrorOnUpsert(ticket);
+        // saveAndFlush + mirrorOnUpsertInline (REQUIRED propagation, not
+        // REQUIRES_NEW) — the booking mirror writes repair_bookings.ticket_id
+        // with a FK to tickets.id, and PlatformRepairBooking has only a plain
+        // UUID (no @ManyToOne) so Hibernate can't infer insert order. Forcing
+        // the ticket INSERT to flush first and keeping the mirror in the same
+        // transaction means the FK passes.
+        ticket = ticketRepository.saveAndFlush(ticket);
+        customerOrderMirrorService.mirrorOnUpsertInline(ticket);
         return toResponse(ticket);
     }
 
@@ -241,9 +264,12 @@ public class TicketService {
     public TicketResponse update(UUID shopId, UUID id, TicketRequest request) {
         Ticket ticket = ticketRepository.findByShopIdAndId(shopId, id)
                 .orElseThrow(() -> new ResourceNotFoundException("Ticket not found: " + id));
-        // Snapshot the prior approval state so a re-edit after approval can
-        // reset the customer's approval and re-prompt them.
+        // Snapshot the prior approval + estimate state. A re-edit can change
+        // priceItemsJson / estimatedPrice (= service re-estimated) or flip
+        // customerApproval; both feed the Service History timeline.
         boolean wasApproved = Boolean.TRUE.equals(ticket.getCustomerApproval());
+        String oldPriceItemsJson = ticket.getPriceItemsJson();
+        BigDecimal oldEstimatedPrice = ticket.getEstimatedPrice();
         ticket.setCustomerId(request.getCustomerId());
         if (request.getCustomerName() != null) ticket.setCustomerName(request.getCustomerName());
         if (request.getCustomerPhone() != null) ticket.setCustomerPhone(request.getCustomerPhone());
@@ -283,6 +309,31 @@ public class TicketService {
                     "Booking re-edited — waiting for customer approval",
                     "SHOP");
         }
+        // Re-estimate: shop added/removed a service or changed the price on an
+        // existing booking. Light up the "Service Re-estimated" rail row so the
+        // customer + owner timelines reflect the change. emitOrUpdate refreshes
+        // the timestamp so multiple re-edits surface as "latest re-estimate".
+        boolean priceItemsChanged = !java.util.Objects.equals(oldPriceItemsJson, ticket.getPriceItemsJson());
+        boolean estimateChanged = (oldEstimatedPrice == null)
+                ? ticket.getEstimatedPrice() != null
+                : (ticket.getEstimatedPrice() == null
+                        || oldEstimatedPrice.compareTo(ticket.getEstimatedPrice()) != 0);
+        if (priceItemsChanged || estimateChanged) {
+            emitOrUpdateBookingEvent(ticket.getId(),
+                    "RE_ESTIMATED_CONFIRMED",
+                    "Service Re-estimated",
+                    "SHOP");
+        }
+        // Shop-side approval flip (owner ticked "Customer Repair Approval" in
+        // the edit flow): light up CUSTOMER_APPROVED. Customer-side approval
+        // is emitted from RepairBookingController#customerApproval; emitBookingEvent
+        // dedupes so an existing row won't double-write.
+        if (!wasApproved && Boolean.TRUE.equals(ticket.getCustomerApproval())) {
+            emitBookingEvent(ticket.getId(),
+                    "CUSTOMER_APPROVED",
+                    "Customer Approved",
+                    "SHOP");
+        }
         return toResponse(ticket);
     }
 
@@ -305,6 +356,36 @@ public class TicketService {
         Ticket ticket = ticketRepository.findByShopIdAndId(shopId, id)
                 .orElseThrow(() -> new ResourceNotFoundException("Ticket not found: " + id));
 
+        UUID technicianBeforePatch = ticket.getAssignedTechnicianId();
+        boolean wasApprovedBeforePatch = Boolean.TRUE.equals(ticket.getCustomerApproval());
+        Technician assignedTechAfterPatch = null;
+
+        // EditBookingScreen (mobile) PATCHes a small set of free-form fields.
+        // Honor only the ones backed by a column; quietly ignore unknown keys.
+        if (body.containsKey("imei")) {
+            Object raw = body.get("imei");
+            ticket.setImei(raw == null ? null : String.valueOf(raw));
+        }
+        if (body.containsKey("issueDescription")) {
+            Object raw = body.get("issueDescription");
+            ticket.setIssueDescription(raw == null ? null : String.valueOf(raw));
+        }
+        if (body.containsKey("estimatedDeliveryAt")) {
+            Object raw = body.get("estimatedDeliveryAt");
+            ticket.setEstimatedDeliveryAt(parseInstantOrNull(raw));
+        }
+        if (body.containsKey("estimatedReadyAt")) {
+            Object raw = body.get("estimatedReadyAt");
+            ticket.setEstimatedReadyAt(parseInstantOrNull(raw));
+        }
+        // Accept both shapes the mobile screens send: customerApproved (Edit
+        // Booking checkbox) and customerApproval (PUT-aligned name).
+        if (body.containsKey("customerApproved") || body.containsKey("customerApproval")) {
+            Object raw = body.containsKey("customerApproved")
+                    ? body.get("customerApproved")
+                    : body.get("customerApproval");
+            ticket.setCustomerApproval(parseBooleanOrNull(raw));
+        }
         if (body.containsKey("assignedTechnicianId")) {
             Object raw = body.get("assignedTechnicianId");
             if (raw == null || String.valueOf(raw).isBlank()) {
@@ -324,7 +405,13 @@ public class TicketService {
                             .build());
                 }
                 ticket.setAssignedTechnicianId(tech.getId());
+                assignedTechAfterPatch = tech;
             }
+            // Owner-side (re)assignment ALWAYS clears the technician's prior
+            // acceptance. A reassign puts the booking back into "awaiting
+            // acceptance" — the new technician must tap Accept themselves
+            // before the timeline lights up ACCEPTED / WORK_STARTED.
+            ticket.setTechnicianAcceptedAt(null);
         }
 
         String statusBeforePatch = ticket.getStatus();
@@ -365,6 +452,97 @@ public class TicketService {
         if (ticket.getStatus() != null && !ticket.getStatus().equalsIgnoreCase(statusBeforePatch)) {
             emitStepEventsForTicketStatus(ticket.getId(), ticket.getStatus());
         }
+        // Technician assignment changed — light up the customer/owner timeline
+        // row that says "Assigned to <Tech>". emitBookingEvent is idempotent
+        // on (booking, statusKey) so a re-save of the same technician id is
+        // a no-op, but a re-assignment to a different technician fires
+        // TECHNICIAN_REASSIGNED so the rail can show both steps.
+        UUID technicianAfterPatch = ticket.getAssignedTechnicianId();
+        boolean technicianChanged = !java.util.Objects.equals(technicianBeforePatch, technicianAfterPatch);
+        if (technicianChanged && technicianAfterPatch != null) {
+            String techName = assignedTechAfterPatch != null && assignedTechAfterPatch.getName() != null
+                    ? assignedTechAfterPatch.getName()
+                    : "Technician";
+            if (technicianBeforePatch == null) {
+                emitBookingEvent(ticket.getId(), "TECHNICIAN_ASSIGNED",
+                        "Assigned to " + techName, "SHOP");
+            } else {
+                emitBookingEvent(ticket.getId(), "TECHNICIAN_REASSIGNED",
+                        "Re-assigned to " + techName, "SHOP");
+            }
+        }
+        // Owner ticked "Customer Repair Approval" in the Edit Booking screen.
+        // Light up CUSTOMER_APPROVED on the timeline; emitBookingEvent dedupes
+        // so a no-op re-save with the flag already true won't double-write.
+        if (!wasApprovedBeforePatch && Boolean.TRUE.equals(ticket.getCustomerApproval())) {
+            emitBookingEvent(ticket.getId(), "CUSTOMER_APPROVED",
+                    "Customer Approved", "SHOP");
+        }
+        return toResponse(ticket);
+    }
+
+    private static java.time.Instant parseInstantOrNull(Object raw) {
+        if (raw == null) return null;
+        String s = String.valueOf(raw).trim();
+        if (s.isEmpty()) return null;
+        try { return java.time.Instant.parse(s); } catch (Exception ignored) {}
+        try { return java.time.OffsetDateTime.parse(s).toInstant(); } catch (Exception ignored) {}
+        return null;
+    }
+
+    private static Boolean parseBooleanOrNull(Object raw) {
+        if (raw == null) return null;
+        if (raw instanceof Boolean b) return b;
+        String s = String.valueOf(raw).trim();
+        if (s.isEmpty()) return null;
+        if ("true".equalsIgnoreCase(s) || "1".equals(s)) return Boolean.TRUE;
+        if ("false".equalsIgnoreCase(s) || "0".equals(s)) return Boolean.FALSE;
+        return null;
+    }
+
+    /**
+     * Technician's explicit Accept action. Sets tickets.technician_accepted_at
+     * to now() and emits TECHNICIAN_ACCEPTED_SERVICE + TECHNICIAN_WORK_STARTED
+     * once. If the ticket was sitting at CREATED (walk-in flow), it also bumps
+     * status to IN_DIAGNOSIS so the rest of the lifecycle plays out as before.
+     *
+     * Authorisation: the JWT user must be the technician currently assigned
+     * to this ticket (technicians.user_id → assigned_technician_id).
+     * Idempotent — calling again after acceptance is a no-op.
+     */
+    @Transactional
+    public TicketResponse acceptByTechnician(UUID shopId, UUID userId, UUID ticketId) {
+        Ticket ticket = ticketRepository.findByShopIdAndId(shopId, ticketId)
+                .orElseThrow(() -> new ResourceNotFoundException("Ticket not found: " + ticketId));
+        if (ticket.getAssignedTechnicianId() == null) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "ticket has no assigned technician");
+        }
+        Technician me = technicianRepository.findByShopIdAndUserId(shopId, userId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.FORBIDDEN, "not a technician of this shop"));
+        if (!ticket.getAssignedTechnicianId().equals(me.getId())) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "ticket is assigned to a different technician");
+        }
+        if (ticket.getTechnicianAcceptedAt() == null) {
+            ticket.setTechnicianAcceptedAt(java.time.Instant.now());
+            // Walk-in tickets are minted at CREATED; pickup-flow tickets at
+            // IN_DIAGNOSIS. Accepting from CREATED also advances status —
+            // pickup-flow tickets are already at IN_DIAGNOSIS so the status
+            // stays put.
+            if ("CREATED".equalsIgnoreCase(ticket.getStatus())) {
+                ticket.setStatus("IN_DIAGNOSIS");
+            }
+            ticket = ticketRepository.save(ticket);
+            customerOrderMirrorService.mirrorOnUpsert(ticket);
+
+            // Emit the customer/owner timeline events now that acceptance is
+            // proven. emitBookingEvent dedupes so a stale auto-fire from a
+            // pre-fix run won't double-write.
+            String techName = me.getName() != null ? me.getName() : "Technician";
+            emitBookingEvent(ticket.getId(), "TECHNICIAN_ACCEPTED_SERVICE",
+                    techName + " accepted the service", "TECHNICIAN");
+            emitBookingEvent(ticket.getId(), "TECHNICIAN_WORK_STARTED",
+                    "Technician Work Started", "TECHNICIAN");
+        }
         return toResponse(ticket);
     }
 
@@ -393,6 +571,12 @@ public class TicketService {
                     .note(note)
                     .actor(actor)
                     .build());
+            // Ping the customer's Notifications screen for the same status,
+            // so they see one entry per real-life update (technician
+            // uploaded images, issue verified, repair completed, etc.).
+            // The mirror's template map silently drops low-signal statuses
+            // and walk-in (no customer_user_id) cases.
+            customerOrderMirrorService.emitCustomerNotificationForStatus(booking.getId(), statusKey);
         });
     }
 
@@ -404,7 +588,21 @@ public class TicketService {
     private static final java.util.Set<String> ALLOWED_PROGRESS_STEP_KEYS = java.util.Set.of(
             "IN_REPAIR", "PARTS_REQUIRED", "PARTS_REPLACED",
             "QUALITY_CHECK_STARTED", "QUALITY_CHECK_COMPLETED", "REPAIR_COMPLETED",
-            "READY", "DELIVERED", "CANCELLED");
+            // READY -> billing/handover sub-flow -> DELIVERED. Each substep is
+            // its own emit so the customer history rail surfaces the invoice and
+            // handover states distinctly instead of skipping straight to
+            // "Delivered to Customer".
+            "READY", "INVOICE_GENERATED", "INVOICE_READY", "DELIVERED_PROCESSING",
+            "DELIVERED", "CANCELLED",
+            // RETURN_DELIVERY is the "device not repaired, returning as-is"
+            // counterpart to READY. Added so the technician can mark a job
+            // returned without going through the full Repair Completed path.
+            "RETURN_DELIVERY",
+            // REPAIR_NOT_COMPLETED is the technician's "tried but couldn't fix"
+            // signal — surfaced on the customer / shop history rail with the
+            // canonical "Your repair is not completed" note. Does NOT advance
+            // ticket.status; the row is for visibility only.
+            "REPAIR_NOT_COMPLETED");
 
     private static final java.util.Set<String> ALLOWED_PROGRESS_ACTORS = java.util.Set.of(
             "TECHNICIAN", "OWNER", "SHOP");
@@ -433,9 +631,14 @@ public class TicketService {
 
     // Only advance forward through the lifecycle — never demote a DELIVERED
     // ticket back to IN_REPAIR because an older code was re-submitted, and
-    // never override CANCELLED.
+    // never override CANCELLED. The post-READY billing/handover substages
+    // (INVOICE_GENERATED, INVOICE_READY, DELIVERED_PROCESSING) sit between
+    // READY and DELIVERED so a Ready ticket can't jump straight to Delivered
+    // without the invoice + handover steps being recorded first.
     private static final java.util.List<String> LIFECYCLE_ORDER = java.util.List.of(
-            "CREATED", "IN_DIAGNOSIS", "QUOTED", "APPROVED", "IN_REPAIR", "READY", "DELIVERED");
+            "CREATED", "IN_DIAGNOSIS", "QUOTED", "APPROVED", "IN_REPAIR",
+            "READY", "INVOICE_GENERATED", "INVOICE_READY", "DELIVERED_PROCESSING",
+            "DELIVERED");
 
     private void advanceTicketStatusForWorkCode(Ticket t, String code) {
         if (code == null || code.isBlank()) return;
@@ -473,11 +676,15 @@ public class TicketService {
     private static String defaultProgressLabel(String key) {
         switch (key) {
             case "IN_REPAIR":              return "Repair Work In Progress";
-            case "PARTS_REQUIRED":         return "Parts Required";
+            case "PARTS_REQUIRED":         return "Spare Parts Waiting";
             case "PARTS_REPLACED":         return "Parts Replaced";
             case "QUALITY_CHECK_STARTED":  return "Quality Check Started";
             case "QUALITY_CHECK_COMPLETED":return "Quality Check Completed";
             case "REPAIR_COMPLETED":       return "Repair Completed";
+            case "REPAIR_NOT_COMPLETED":   return "Your repair is not completed";
+            case "INVOICE_GENERATED":      return "Invoice Generated";
+            case "INVOICE_READY":          return "Invoice Ready";
+            case "DELIVERED_PROCESSING":   return "Delivered to Customer Processing";
             case "READY":                  return "Ready for Delivery";
             case "DELIVERED":              return "Delivered to Customer";
             case "CANCELLED":              return "Work Cancelled";
@@ -490,6 +697,11 @@ public class TicketService {
     // changes on each invocation — e.g. compliance notes (latest note text
     // should display) and re-edit-driven approval requests (latest timestamp).
     private void emitOrUpdateBookingEvent(UUID ticketId, String statusKey, String note, String actor) {
+        emitOrUpdateBookingEvent(ticketId, statusKey, note, actor, null, null);
+    }
+
+    private void emitOrUpdateBookingEvent(UUID ticketId, String statusKey, String note, String actor,
+                                          String audioUrl, String imagesJson) {
         platformRepairBookingRepository.findByTicketId(ticketId).ifPresent(booking -> {
             var existing = platformRepairBookingEventRepository
                     .findByBookingIdOrderByCreatedAtAsc(booking.getId())
@@ -500,6 +712,11 @@ public class TicketService {
                 PlatformRepairBookingEvent e = existing.get();
                 e.setNote(note);
                 e.setActor(actor);
+                // Re-emit overwrites media too so editing a compliance note
+                // (re-recording the voice clip, swapping an image) lands on
+                // the customer/owner timeline row right away.
+                e.setAudioUrl(audioUrl);
+                e.setImagesJson(imagesJson);
                 // Refresh the timestamp so the customer/owner timeline rail
                 // reflects this as the most recent action — required because
                 // the dedup keyed by status would otherwise keep the original
@@ -512,7 +729,14 @@ public class TicketService {
                         .status(statusKey)
                         .note(note)
                         .actor(actor)
+                        .audioUrl(audioUrl)
+                        .imagesJson(imagesJson)
                         .build());
+                // First-time emit of this status → ping the customer's
+                // Notifications screen. Update branch above intentionally
+                // skips this so re-emits (e.g., the technician editing a
+                // verified note) don't spam the same alert twice.
+                customerOrderMirrorService.emitCustomerNotificationForStatus(booking.getId(), statusKey);
             }
         });
     }
@@ -564,13 +788,33 @@ public class TicketService {
     }
 
     private TicketResponse toResponse(Ticket t) {
+        // Resolve the few "booking-side" fields once — these all share the
+        // same fallback shape (use the ticket column if present, otherwise
+        // pull from the linked repair_booking). Doing the lookup once means
+        // we hit platformRepairBookingRepository at most once per ticket
+        // render rather than once per field.
+        TicketBookingFallback fallback = resolveBookingFallback(t);
+        // Latest customer-visible compliance note → flat fields the detail
+        // screens render on the "Issue Verified & Updated" card. Internal-
+        // only notes are filtered out so private shop chatter never leaks
+        // to the customer payload.
+        RepairNote complianceNote = repairNoteRepository
+                .findByTicketIdOrderByCreatedAtDesc(t.getId()).stream()
+                .filter(n -> !Boolean.TRUE.equals(n.getIsInternal()))
+                .findFirst()
+                .orElse(null);
+        List<String> complianceImages = complianceNote != null
+                ? parseImagesJson(complianceNote.getImagesJson())
+                : Collections.emptyList();
         return TicketResponse.builder()
                 .id(t.getId())
                 .shopId(t.getShopId())
                 .customerId(t.getCustomerId())
-                .customerName(t.getCustomerName())
-                .customerPhone(t.getCustomerPhone())
+                .customerName(fallback.customerName)
+                .customerPhone(fallback.customerPhone)
+                .customerAddress(fallback.customerAddress)
                 .assignedTechnicianId(t.getAssignedTechnicianId())
+                .technicianAcceptedAt(t.getTechnicianAcceptedAt())
                 .trackingId(t.getTrackingId())
                 .brandId(t.getBrandId())
                 .modelId(t.getModelId())
@@ -581,43 +825,179 @@ public class TicketService {
                 .estimatedPrice(t.getEstimatedPrice())
                 .finalPrice(t.getFinalPrice())
                 .issueDescription(t.getIssueDescription())
+                .issueAudioUrl(t.getIssueAudioUrl())
                 .createdAt(t.getCreatedAt())
                 .updatedAt(t.getUpdatedAt())
                 .deviceDisplayName(t.getDeviceDisplayName())
                 .deviceImageUrl(t.getDeviceImageUrl())
                 .repairServicesSummary(t.getRepairServicesSummary())
                 .priceItemsJson(t.getPriceItemsJson())
-                .missingPartsJson(t.getMissingPartsJson())
-                .devicePhotosJson(resolveDevicePhotosJson(t))
+                .missingPartsJson(fallback.missingPartsJson)
+                .devicePhotosJson(fallback.devicePhotosJson)
                 .technicianPhotosJson(t.getTechnicianPhotosJson())
                 .deviceSecurityType(t.getDeviceSecurityType())
-                .deviceSecurityValue(t.getDeviceSecurityValue())
-                .customerApproval(t.getCustomerApproval())
-                .estimatedReadyAt(t.getEstimatedReadyAt())
-                .estimatedDeliveryAt(t.getEstimatedDeliveryAt())
+                .deviceSecurityValue(fallback.deviceSecurityValue)
+                .customerApproval(fallback.customerApproval)
+                .estimatedReadyAt(fallback.estimatedReadyAt)
+                .estimatedDeliveryAt(fallback.estimatedDeliveryAt)
+                .complianceNote(complianceNote != null ? complianceNote.getNote() : null)
+                .complianceAudioUrl(complianceNote != null ? complianceNote.getAudioUrl() : null)
+                .complianceImageUrls(complianceImages)
+                .complianceVerifiedAt(complianceNote != null ? complianceNote.getCreatedAt() : null)
                 .build();
     }
 
-    // Customer-created bookings hold device photos in repair_bookings.front/back/video_url
-    // columns. When the owner converts that booking into a ticket without copying the
-    // photos, ticket.device_photos_json is null and the technician sees nothing. Fall
-    // back to the linked booking so the photos surface for both new and pre-existing
-    // tickets without a data migration.
-    private String resolveDevicePhotosJson(Ticket t) {
-        String existing = t.getDevicePhotosJson();
-        if (existing != null && !existing.isBlank() && !"{}".equals(existing.trim())) return existing;
-        return platformRepairBookingRepository.findByTicketId(t.getId())
-                .map(b -> {
-                    Map<String, String> photos = new HashMap<>();
-                    if (b.getFrontImageUrl() != null) photos.put("front", b.getFrontImageUrl());
-                    if (b.getBackImageUrl() != null) photos.put("back", b.getBackImageUrl());
-                    if (b.getVideoUrl() != null) photos.put("video", b.getVideoUrl());
-                    if (photos.isEmpty()) return existing;
-                    try { return new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(photos); }
-                    catch (Exception e) { return existing; }
-                })
-                .orElse(existing);
+    /**
+     * Holds the half-dozen fields that the booking detail screens read but
+     * that ticket-side columns may not yet have populated (because the
+     * pickup person filled them in on the repair_booking row before the
+     * shop minted the ticket). Each field prefers the ticket's own value
+     * and falls back to the linked PlatformRepairBooking — so tickets minted
+     * before mintTicketFromBooking learned to copy these snapshot fields
+     * still render correctly on the owner Device Details screen.
+     */
+    private static final class TicketBookingFallback {
+        String customerName;
+        String customerPhone;
+        String customerAddress;
+        String devicePhotosJson;
+        String missingPartsJson;
+        String deviceSecurityValue;
+        Boolean customerApproval;
+        Instant estimatedReadyAt;
+        Instant estimatedDeliveryAt;
     }
+
+    private TicketBookingFallback resolveBookingFallback(Ticket t) {
+        TicketBookingFallback f = new TicketBookingFallback();
+        f.customerName = t.getCustomerName();
+        f.customerPhone = t.getCustomerPhone();
+        f.customerAddress = t.getCustomerAddress();
+        f.devicePhotosJson = t.getDevicePhotosJson();
+        f.missingPartsJson = t.getMissingPartsJson();
+        f.deviceSecurityValue = t.getDeviceSecurityValue();
+        f.customerApproval = t.getCustomerApproval();
+        f.estimatedReadyAt = t.getEstimatedReadyAt();
+        f.estimatedDeliveryAt = t.getEstimatedDeliveryAt();
+        if (!needsBookingFallback(f)) return f;
+        platformRepairBookingRepository.findByTicketId(t.getId()).ifPresent(b -> {
+            if (isBlankStr(f.customerName) && b.getCustomerName() != null && !b.getCustomerName().isBlank()) {
+                f.customerName = b.getCustomerName();
+            }
+            if (isBlankStr(f.customerPhone) && b.getCustomerMobile() != null && !b.getCustomerMobile().isBlank()) {
+                f.customerPhone = b.getCustomerMobile();
+            }
+            if (isBlankStr(f.customerAddress) && b.getPickupAddressId() != null) {
+                platformCustomerAddressRepository.findById(b.getPickupAddressId()).ifPresent(addr -> {
+                    String joined = joinAddressParts(
+                            addr.getAddressLine(), addr.getLocality(),
+                            addr.getCity(), addr.getState(), addr.getPincode());
+                    if (joined != null) f.customerAddress = joined;
+                });
+            }
+            if (isBlankJson(f.devicePhotosJson)) {
+                Map<String, String> photos = new HashMap<>();
+                if (b.getFrontImageUrl() != null) photos.put("front", b.getFrontImageUrl());
+                if (b.getBackImageUrl()  != null) photos.put("back",  b.getBackImageUrl());
+                if (b.getVideoUrl()      != null) photos.put("video", b.getVideoUrl());
+                if (!photos.isEmpty()) {
+                    try { f.devicePhotosJson = new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(photos); }
+                    catch (Exception ignore) {}
+                }
+            }
+            if (isBlankJson(f.missingPartsJson) && b.getMissingDamageParts() != null
+                    && !b.getMissingDamageParts().isBlank()) {
+                String raw = b.getMissingDamageParts().trim();
+                if (raw.startsWith("[")) {
+                    f.missingPartsJson = raw;
+                } else {
+                    List<String> parts = new ArrayList<>();
+                    for (String piece : raw.split("[,\\n]")) {
+                        String p = piece.trim();
+                        if (!p.isEmpty()) parts.add(p);
+                    }
+                    if (!parts.isEmpty()) {
+                        try { f.missingPartsJson = new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(parts); }
+                        catch (Exception ignore) {}
+                    }
+                }
+            }
+            if ((f.deviceSecurityValue == null || f.deviceSecurityValue.isBlank())
+                    && b.getDevicePin() != null && !b.getDevicePin().isBlank()) {
+                f.deviceSecurityValue = b.getDevicePin();
+            }
+            if (f.customerApproval == null && b.getCustomerApproval() != null) {
+                String s = b.getCustomerApproval().trim().toUpperCase();
+                if (s.equals("DONE") || s.equals("TRUE") || s.equals("YES") || s.equals("APPROVED")) {
+                    f.customerApproval = Boolean.TRUE;
+                } else if (s.equals("PENDING") || s.equals("FALSE") || s.equals("NO")) {
+                    f.customerApproval = Boolean.FALSE;
+                }
+            }
+            if (f.estimatedReadyAt == null && b.getEstimatedReadyAt() != null) {
+                f.estimatedReadyAt = b.getEstimatedReadyAt();
+            }
+            if (f.estimatedDeliveryAt == null && b.getEstimatedDeliveryAt() != null) {
+                f.estimatedDeliveryAt = b.getEstimatedDeliveryAt();
+            }
+            // Customer-flow pickup bookings (order-service RepairBookingController.create)
+            // store only customer_user_id; the denormalized customer_name/customer_mobile
+            // columns stay NULL. Without this reach into customer_users, the owner's
+            // Bookings History card and the Booking Details "Customer Details" pane
+            // both render blank for every customer-placed pickup.
+            if ((isBlankStr(f.customerName) || isBlankStr(f.customerPhone))
+                    && b.getCustomerUserId() != null) {
+                platformCustomerUserRepository.findById(b.getCustomerUserId()).ifPresent(cu -> {
+                    if (isBlankStr(f.customerName) && cu.getFullName() != null && !cu.getFullName().isBlank()) {
+                        f.customerName = cu.getFullName();
+                    }
+                    if (isBlankStr(f.customerPhone) && cu.getMobile() != null && !cu.getMobile().isBlank()) {
+                        f.customerPhone = cu.getMobile();
+                    }
+                });
+            }
+        });
+        return f;
+    }
+
+    private static boolean needsBookingFallback(TicketBookingFallback f) {
+        return isBlankStr(f.customerName)
+                || isBlankStr(f.customerPhone)
+                || isBlankStr(f.customerAddress)
+                || isBlankJson(f.devicePhotosJson)
+                || isBlankJson(f.missingPartsJson)
+                || isBlankStr(f.deviceSecurityValue)
+                || f.customerApproval == null
+                || f.estimatedReadyAt == null
+                || f.estimatedDeliveryAt == null;
+    }
+
+    private static boolean isBlankStr(String s) {
+        return s == null || s.isBlank();
+    }
+
+    private static boolean isBlankJson(String s) {
+        if (s == null) return true;
+        String trim = s.trim();
+        return trim.isEmpty() || trim.equals("{}") || trim.equals("[]");
+    }
+
+    private static String joinAddressParts(String line, String locality, String city, String state, String pincode) {
+        List<String> parts = new ArrayList<>();
+        if (line     != null && !line.isBlank())     parts.add(line.trim());
+        if (locality != null && !locality.isBlank()) parts.add(locality.trim());
+        if (city     != null && !city.isBlank())     parts.add(city.trim());
+        if (state    != null && !state.isBlank())    parts.add(state.trim());
+        if (pincode  != null && !pincode.isBlank())  parts.add(pincode.trim());
+        return parts.isEmpty() ? null : String.join(", ", parts);
+    }
+
+    // Booking-side field fallback lives in resolveBookingFallback() above —
+    // it covers device_photos_json AND missing_parts_json, device_security_value,
+    // customer_approval, estimated_ready_at, estimated_delivery_at in a single
+    // booking lookup, so the booking detail screens render the same data
+    // whether the ticket was minted before or after mintTicketFromBooking
+    // learned to copy these snapshot fields at mint time.
 
     // ---------- Repair notes ----------------------------------------------
 
@@ -625,24 +1005,43 @@ public class TicketService {
     public RepairNoteResponse addRepairNote(UUID shopId, UUID ticketId, UUID authorId, CreateRepairNoteRequest body) {
         Ticket t = ticketRepository.findByShopIdAndId(shopId, ticketId)
                 .orElseThrow(() -> new ResourceNotFoundException("Ticket not found: " + ticketId));
+        // Serialize optional image attachments as a JSON array string in the
+        // images_json TEXT column (matches how tickets.device_photos_json /
+        // tickets.technician_photos_json are stored). Empty list collapses to
+        // null so reads can short-circuit on isBlank.
+        String imagesJson = null;
+        if (body.getImageUrls() != null && !body.getImageUrls().isEmpty()) {
+            try {
+                imagesJson = new com.fasterxml.jackson.databind.ObjectMapper()
+                        .writeValueAsString(body.getImageUrls());
+            } catch (Exception ignored) { /* leave null on malformed input */ }
+        }
+        String audioUrl = body.getAudioUrl();
+        if (audioUrl != null && audioUrl.isBlank()) audioUrl = null;
         RepairNote saved = repairNoteRepository.save(RepairNote.builder()
                 .ticketId(t.getId())
                 .authorId(authorId)
                 .note(body.getNote())
                 .isInternal(Boolean.TRUE.equals(body.getIsInternal()))
+                .audioUrl(audioUrl)
+                .imagesJson(imagesJson)
                 .build());
-        // Customer-visible compliance notes light up the "Technician Compliance
-        // Issue Verified & Updated" step. Internal-only notes stay off the
-        // timeline so the customer doesn't see private shop chatter. The event
-        // note carries the technician's actual text so the customer sees what
-        // was verified, not just a canned label.
+        // Customer-visible compliance notes light up the "Technician Issue
+        // Verified & Updated" step. Internal-only notes stay off the timeline
+        // so the customer doesn't see private shop chatter. The event note
+        // carries the technician's actual text so the customer sees what was
+        // verified, not just a canned label.
         if (!Boolean.TRUE.equals(body.getIsInternal())) {
             String noteText = body.getNote() != null && !body.getNote().isBlank()
                     ? body.getNote()
-                    : "Technician Compliance Issue Verified & Updated";
+                    : "Technician Issue Verified & Updated";
+            // Carry the voice-note + image attachments onto the timeline event
+            // so the customer / owner Issue Verified row can render the media
+            // inline without a separate fetch from repair_notes.
             emitOrUpdateBookingEvent(t.getId(),
                     "TECHNICIAN_COMPLIANCE_ISSUE_VERIFIED_UPDATED",
-                    noteText, "TECHNICIAN");
+                    noteText, "TECHNICIAN",
+                    audioUrl, imagesJson);
         }
         return toNoteResponse(saved);
     }
@@ -663,8 +1062,28 @@ public class TicketService {
                 .authorId(n.getAuthorId())
                 .note(n.getNote())
                 .isInternal(n.getIsInternal())
+                .audioUrl(n.getAudioUrl())
+                .imageUrls(parseImagesJson(n.getImagesJson()))
                 .createdAt(n.getCreatedAt())
                 .build();
+    }
+
+    // Re-hydrate the images_json TEXT column (stored as ["url", ...]) into a
+    // List<String>. Shared between repair_notes responses and timeline event
+    // responses so both surfaces parse the same shape.
+    private static List<String> parseImagesJson(String raw) {
+        if (raw == null || raw.isBlank()) return Collections.emptyList();
+        try {
+            List<?> parsed = new com.fasterxml.jackson.databind.ObjectMapper()
+                    .readValue(raw, List.class);
+            List<String> urls = new ArrayList<>();
+            for (Object o : parsed) {
+                if (o != null) urls.add(o.toString());
+            }
+            return urls;
+        } catch (Exception ignored) {
+            return Collections.emptyList();
+        }
     }
 
     // ---------- Solution packs --------------------------------------------

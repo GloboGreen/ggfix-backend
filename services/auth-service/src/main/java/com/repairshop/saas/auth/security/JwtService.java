@@ -27,6 +27,15 @@ public class JwtService {
     }
 
     public String generateToken(UUID userId, UUID shopId, String email, List<String> roles) {
+        return generateToken(userId, shopId, email, roles, null);
+    }
+
+    /**
+     * Overload that stamps a loginScope claim ("OWNER" or "SHOP") so downstream
+     * services and /auth/switch-shop can refuse cross-scope actions. Pass null
+     * to omit the claim (legacy owner tokens).
+     */
+    public String generateToken(UUID userId, UUID shopId, String email, List<String> roles, String loginScope) {
         Date now = new Date();
         Date expiry = new Date(now.getTime() + expiryMs);
         var builder = Jwts.builder()
@@ -37,6 +46,7 @@ public class JwtService {
                 .expiration(expiry)
                 .signWith(key);
         if (shopId != null) builder.claim("shopId", shopId.toString());
+        if (loginScope != null && !loginScope.isBlank()) builder.claim("loginScope", loginScope);
         return builder.compact();
     }
 
@@ -70,6 +80,11 @@ public class JwtService {
 
     public UUID getShopId(String token) {
         return UUID.fromString(parseClaims(token).get("shopId", String.class));
+    }
+
+    /** Returns "OWNER", "SHOP", or null when the claim isn't present (legacy tokens). */
+    public String getLoginScope(String token) {
+        return parseClaims(token).get("loginScope", String.class);
     }
 
     @SuppressWarnings("unchecked")

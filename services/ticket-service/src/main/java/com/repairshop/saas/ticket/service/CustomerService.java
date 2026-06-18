@@ -6,17 +6,16 @@ import com.repairshop.saas.ticket.entity.PlatformCustomerAddress;
 import com.repairshop.saas.ticket.entity.PlatformCustomerUser;
 import com.repairshop.saas.ticket.repository.PlatformCustomerAddressRepository;
 import com.repairshop.saas.ticket.repository.PlatformCustomerUserRepository;
+import com.repairshop.saas.ticket.repository.TicketRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.Instant;
 import java.util.ArrayList;
-import java.util.Collections;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
-import java.util.Set;
 import java.util.UUID;
 
 @Service
@@ -28,6 +27,7 @@ public class CustomerService {
 
     private final PlatformCustomerUserRepository platformCustomerUserRepository;
     private final PlatformCustomerAddressRepository platformCustomerAddressRepository;
+    private final TicketRepository ticketRepository;
 
     /** Default dev OTP seeded on every shop-created customer_users row so the
      *  customer can log into the mobile app with mobile + 123456 without
@@ -44,8 +44,9 @@ public class CustomerService {
         String name  = request.getName()    != null ? request.getName().trim()    : null;
         String email = request.getEmail()   != null && !request.getEmail().isBlank()
                 ? request.getEmail().trim().toLowerCase() : null;
-        String phone = request.getPhone()   != null ? request.getPhone().trim()   : null;
+        String phone = normalizePhone(request.getPhone());
         String addr  = request.getAddress() != null ? request.getAddress().trim() : null;
+        String idProofUrl = trimOrNull(request.getIdProofUrl());
 
         // If a customer_users row already exists for this mobile, reuse it
         // instead of failing on the UNIQUE constraint. Refresh the name/email
@@ -58,11 +59,13 @@ public class CustomerService {
             user.setFullName(name);
             user.setEmail(email);
             user.setMobile(phone);
+            user.setIdProofUrl(idProofUrl);
             user.setIsActive(true);
             user.setOtpCode(DEFAULT_DEV_OTP);
         } else {
             if (name != null && !name.isBlank()) user.setFullName(name);
             if (email != null) user.setEmail(email);
+            if (idProofUrl != null) user.setIdProofUrl(idProofUrl);
             if (user.getOtpCode() == null) user.setOtpCode(DEFAULT_DEV_OTP);
             user.setIsActive(true);
         }
@@ -98,7 +101,7 @@ public class CustomerService {
                 platformCustomerAddressRepository.save(a);
             }
         }
-        return toPlatformResponse(user);
+        return toPlatformResponse(shopId, user);
     }
 
     private static String trimOrNull(String s) {
@@ -118,7 +121,7 @@ public class CustomerService {
                 : platformCustomerUserRepository.searchActive(query, PageRequest.of(0, MAX_PLATFORM_RESULTS));
         List<CustomerResponse> out = new ArrayList<>(users.size());
         for (PlatformCustomerUser u : users) {
-            out.add(toPlatformResponse(u));
+            out.add(toPlatformResponse(shopId, u));
         }
         return out;
     }
@@ -133,7 +136,8 @@ public class CustomerService {
         String phone = normalizePhone(mobile);
         if (phone == null) return Optional.empty();
         return platformCustomerUserRepository.findByMobile(phone)
-                .map(this::toPlatformResponse);
+                .or(() -> platformCustomerUserRepository.findByMobile(lastTenDigits(phone)))
+                .map(u -> toPlatformResponse(shopId, u));
     }
 
     /**
@@ -149,7 +153,7 @@ public class CustomerService {
         PlatformCustomerUser u = platformCustomerUserRepository.findById(platformUserId)
                 .orElseThrow(() -> new IllegalArgumentException(
                         "Platform customer not found: " + platformUserId));
-        return toPlatformResponse(u);
+        return toPlatformResponse(shopId, u);
     }
 
     private static String joinAddress(PlatformCustomerAddress a) {
@@ -165,23 +169,38 @@ public class CustomerService {
     private static String normalizePhone(String raw) {
         if (raw == null) return null;
         String s = raw.replaceAll("[\\s+\\-]", "");
+        if (s.length() > 10 && s.startsWith("91")) s = s.substring(s.length() - 10);
         return s.isEmpty() ? null : s;
+    }
+
+    private static String lastTenDigits(String phone) {
+        if (phone == null || phone.length() <= 10) return phone;
+        return phone.substring(phone.length() - 10);
     }
 
     // The old toResponse(Customer) helper was removed along with the
     // per-shop customers table; everything now flows through
     // toPlatformResponse(PlatformCustomerUser) below.
 
-    private CustomerResponse toPlatformResponse(PlatformCustomerUser u) {
+    private CustomerResponse toPlatformResponse(UUID shopId, PlatformCustomerUser u) {
         PlatformCustomerAddress addr = platformCustomerAddressRepository
                 .findPreferred(u.getId()).orElse(null);
+        long bookingCount = shopId == null ? 0L : ticketRepository.countByShopIdAndCustomerId(shopId, u.getId());
+        Instant lastBookingAt = shopId == null ? null : ticketRepository
+                .findFirstByShopIdAndCustomerIdOrderByCreatedAtDesc(shopId, u.getId())
+                .map(t -> t.getCreatedAt())
+                .orElse(null);
         CustomerResponse.CustomerResponseBuilder b = CustomerResponse.builder()
                 .id(u.getId())
                 .name(u.getFullName())
                 .email(u.getEmail())
                 .phone(u.getMobile())
+                .mobile(u.getMobile())
+                .idProofUrl(u.getIdProofUrl())
                 .address(joinAddress(addr))
                 .createdAt(null)
+                .bookingCount(bookingCount)
+                .lastBookingAt(lastBookingAt)
                 .source("platform")
                 .platformUserId(u.getId());
         applyAddress(b, addr);
@@ -193,6 +212,9 @@ public class CustomerService {
         b.addressLine(a.getAddressLine())
                 .locality(a.getLocality())
                 .city(a.getCity())
+                .district(a.getDistrict())
+                .taluk(a.getTaluk())
+                .area(a.getArea())
                 .state(a.getState())
                 .pincode(a.getPincode());
     }

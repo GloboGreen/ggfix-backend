@@ -17,6 +17,8 @@ public interface ShopRepository extends JpaRepository<Shop, UUID> {
 
     java.util.List<Shop> findByOwnerUserIdOrderByCreatedAtAsc(UUID ownerUserId);
 
+    java.util.List<Shop> findByMobile(String mobile);
+
     /** Pickup-enabled shops with usable coords — filtered by distance in the service layer. */
     java.util.List<Shop> findByPickupEnabledTrueAndLatitudeNotNullAndLongitudeNotNull();
 }

@@ -13,5 +13,7 @@ public interface CustomerChatThreadRepository extends JpaRepository<CustomerChat
 
     List<CustomerChatThread> findByCustomerUserIdOrderByLastMessageAtDesc(UUID customerUserId);
 
+    List<CustomerChatThread> findByShopIdOrderByLastMessageAtDesc(UUID shopId);
+
     Optional<CustomerChatThread> findByCustomerUserIdAndShopId(UUID customerUserId, UUID shopId);
 }

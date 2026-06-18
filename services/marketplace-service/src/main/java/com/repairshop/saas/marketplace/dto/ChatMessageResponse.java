@@ -14,8 +14,11 @@ import java.util.UUID;
 public class ChatMessageResponse {
     private UUID id;
     private UUID threadId;
-    private String sender;
+    private String sender;       // CUSTOMER | SHOP | SYSTEM
     private String body;
     private String attachmentUrl;
+    private String attachmentType; // IMAGE | AUDIO | FILE
     private Instant createdAt;
+    private Instant readAt;
+    private Boolean read;        // convenience: readAt != null
 }

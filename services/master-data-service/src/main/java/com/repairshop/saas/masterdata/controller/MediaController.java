@@ -88,6 +88,13 @@ public class MediaController {
         String targetFolder = resolveFolder(folderOverride);
         long timestamp = System.currentTimeMillis() / 1000L;
 
+        // Cloudinary segments uploads by resource type. `/image/upload` rejects
+        // audio/video files; `/video/upload` accepts both video AND audio (per
+        // Cloudinary docs); `/raw/upload` is for anything else (PDFs, etc.).
+        // We pick based on the incoming Content-Type so the customer's voice
+        // note (audio/m4a) lands at /video/upload instead of failing.
+        String resourceType = resourceTypeFor(file.getContentType());
+
         // Build the parameter set to sign (lexicographically sorted by key).
         TreeMap<String, String> toSign = new TreeMap<>();
         toSign.put("folder", targetFolder);
@@ -110,7 +117,7 @@ public class MediaController {
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.MULTIPART_FORM_DATA);
 
-        String url = "https://api.cloudinary.com/v1_1/" + cfg.getCloudName() + "/image/upload";
+        String url = "https://api.cloudinary.com/v1_1/" + cfg.getCloudName() + "/" + resourceType + "/upload";
         @SuppressWarnings("rawtypes")
         ResponseEntity<Map> resp = restTemplate.postForEntity(url, new HttpEntity<>(body, headers), Map.class);
         @SuppressWarnings("unchecked")
@@ -120,10 +127,26 @@ public class MediaController {
         out.put("url", result.get("secure_url"));
         out.put("publicId", result.get("public_id"));
         out.put("source", "cloudinary");
+        out.put("resourceType", resourceType);
         out.put("width", result.get("width"));
         out.put("height", result.get("height"));
+        out.put("duration", result.get("duration"));
         out.put("bytes", result.get("bytes"));
         return out;
+    }
+
+    /**
+     * Map an incoming Content-Type to the matching Cloudinary upload segment.
+     * Audio files must go to /video/upload — Cloudinary handles audio there.
+     * Anything we don't recognise as image/video/audio falls back to /raw/upload
+     * so the request still succeeds.
+     */
+    private static String resourceTypeFor(String contentType) {
+        String ct = contentType == null ? "" : contentType.toLowerCase();
+        if (ct.startsWith("image/")) return "image";
+        if (ct.startsWith("video/")) return "video";
+        if (ct.startsWith("audio/")) return "video"; // Cloudinary accepts audio at /video/upload
+        return "raw";
     }
 
     // ---- Fallback: base64 data URI ----

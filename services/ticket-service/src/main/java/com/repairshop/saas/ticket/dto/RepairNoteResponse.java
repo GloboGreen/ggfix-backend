@@ -7,6 +7,7 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.UUID;
 
 @Data
@@ -21,5 +22,7 @@ public class RepairNoteResponse {
     private UUID authorId;
     private String note;
     private Boolean isInternal;
+    private String audioUrl;
+    private List<String> imageUrls;
     private Instant createdAt;
 }

@@ -15,7 +15,7 @@ VALUES
   ('TECHNICIAN_ACCEPTED',                       'Technician Accepted',                       'IN_REPAIR',     20, true),
   ('TECHNICIAN_WORK_STARTED',                   'Technician Work Started',                   'IN_REPAIR',     30, true),
   ('TECHNICIAN_UPLOADED_DEVICE_IMAGES',         'Technician Uploaded Device Images',         'IN_REPAIR',     40, true),
-  ('TECHNICIAN_COMPLIANCE_ISSUE_VERIFIED',      'Technician Compliance Issue Verified & Updated', 'IN_REPAIR', 60, true),
+  ('TECHNICIAN_COMPLIANCE_ISSUE_VERIFIED',      'Technician Issue Verified & Updated', 'IN_REPAIR', 60, true),
   ('WAITING_FOR_CUSTOMER_APPROVAL',             'Waiting for Customer Approval',             'IN_REPAIR',     70, true),
   ('CUSTOMER_APPROVED',                         'Customer Approved',                         'IN_REPAIR',     80, true),
   ('CUSTOMER_REJECTED',                         'Customer Rejected',                         'IN_REPAIR',     90, true),

@@ -48,6 +48,17 @@ public class LoginResponse {
     @Schema(description = "All shops the user can access (SHOP_OWNER only). One of these is the active shop matching shopId.")
     private List<ShopAccess> shops;
 
+    @Schema(description = "Login scope: OWNER (multi-shop, can switch) or SHOP (single-shop, locked to shopId). Drives client switcher visibility.",
+            example = "OWNER")
+    private String loginScope;
+
+    @Schema(description = "Authoritative login type used by clients to route the user. " +
+            "SUPER_ADMIN → admin dashboard; SHOP_OWNER → owner home with shop switcher; " +
+            "SHOP_LOGIN → single-shop home (no switcher); EMPLOYEE → employee home.",
+            example = "SHOP_OWNER",
+            allowableValues = {"SUPER_ADMIN", "SHOP_OWNER", "SHOP_LOGIN", "EMPLOYEE"})
+    private String loginType;
+
     @Data
     @NoArgsConstructor
     @AllArgsConstructor

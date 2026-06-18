@@ -7,6 +7,7 @@ import com.repairshop.saas.auth.dto.CustomerLoginRequest;
 import com.repairshop.saas.auth.dto.CustomerRegisterRequest;
 import com.repairshop.saas.auth.dto.LoginRequest;
 import com.repairshop.saas.auth.dto.LoginResponse;
+import com.repairshop.saas.auth.dto.ShopLoginRequest;
 import com.repairshop.saas.auth.dto.RegisterRequest;
 import com.repairshop.saas.auth.dto.RegisterResponse;
 import com.repairshop.saas.auth.dto.RegisterTechnicianRequest;
@@ -65,12 +66,15 @@ public class AuthController {
     @PostMapping("/switch-shop")
     @ResponseStatus(HttpStatus.OK)
     @Operation(summary = "Switch active shop",
-            description = "Re-issue JWT with the given shopId. Only SHOP_OWNER users may call this; the shopId must be one they own.")
+            description = "Re-issue JWT with the given shopId. Only SHOP_OWNER users may call this; the shopId must be one they own. Refused for SHOP-scoped tokens (shop-mobile login).")
     public LoginResponse switchShop(HttpServletRequest httpRequest, @RequestBody Map<String, String> body) {
         String header = httpRequest.getHeader("Authorization");
         if (header == null || !header.startsWith("Bearer "))
             throw new UnauthorizedException("Missing or invalid Authorization header");
-        UUID userId = jwtService.getUserId(header.substring("Bearer ".length()).trim());
+        String token = header.substring("Bearer ".length()).trim();
+        if ("SHOP".equalsIgnoreCase(jwtService.getLoginScope(token)))
+            throw new UnauthorizedException("This session is locked to a single shop");
+        UUID userId = jwtService.getUserId(token);
         String shopIdStr = body == null ? null : body.get("shopId");
         if (shopIdStr == null || shopIdStr.isBlank())
             throw new UnauthorizedException("shopId is required");
@@ -78,6 +82,37 @@ public class AuthController {
         try { shopId = UUID.fromString(shopIdStr); }
         catch (IllegalArgumentException e) { throw new UnauthorizedException("Invalid shopId"); }
         return authService.switchShop(userId, shopId);
+    }
+
+    @PostMapping("/shop-login")
+    @ResponseStatus(HttpStatus.OK)
+    @Operation(summary = "Login by shop mobile number",
+            description = "Authenticates against shops.mobile + (mobile_password_hash | mobile_otp_code). Returns a JWT locked to that one shop (loginScope=SHOP). The shop switcher is disabled for these sessions.")
+    public LoginResponse shopLogin(@Valid @RequestBody ShopLoginRequest request) {
+        return authService.shopLogin(request);
+    }
+
+    @PostMapping("/shop-login/request-otp")
+    @ResponseStatus(HttpStatus.OK)
+    @Operation(summary = "Request OTP for shop-mobile login",
+            description = "Returns the current shops.mobile_otp_code in dev mode (production would SMS it and respond { sent: true }). Default OTP is 123456 to match the existing dev pattern.")
+    public Map<String, Object> requestShopLoginOtp(@RequestBody Map<String, String> body) {
+        String mobile = body == null ? null : body.get("mobile");
+        if (mobile == null || mobile.isBlank())
+            throw new UnauthorizedException("mobile is required");
+        String code = authService.issueShopMobileOtp(mobile);
+        return Map.of("sent", true, "devOtp", code, "ttlMinutes", 10);
+    }
+
+    @PatchMapping("/shop-owners/{ownerId}/locations/{shopId}/mobile-password")
+    @ResponseStatus(HttpStatus.OK)
+    @Operation(summary = "Set the shop's mobile-login password",
+            description = "Owner-only. Sets/replaces the bcrypt password used by POST /auth/shop-login. Pass an empty string to clear (OTP login remains available).")
+    public ShopOwnerView setShopMobilePassword(@PathVariable UUID ownerId,
+                                               @PathVariable UUID shopId,
+                                               @RequestBody Map<String, String> body) {
+        String pwd = body == null ? null : body.get("password");
+        return authService.setShopMobilePassword(ownerId, shopId, pwd);
     }
 
     @PostMapping("/register")

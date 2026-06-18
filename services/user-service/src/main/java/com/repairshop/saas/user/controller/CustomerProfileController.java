@@ -111,15 +111,24 @@ public class CustomerProfileController {
         // Make sure the local customer_users row exists so the FK on
         // customer_addresses.customer_user_id is satisfied.
         ensureLocalUser(userId);
+        // The form now collects area + district + taluk explicitly. We dual-write:
+        //   area     -> locality  (so legacy readers of `.locality` keep working)
+        //   district -> city      (so legacy readers of `.city` keep working)
+        // If the client also sends an explicit locality/city, those win.
+        String resolvedCity = body.getCity() != null ? body.getCity() : body.getDistrict();
+        String resolvedLocality = body.getLocality() != null ? body.getLocality() : body.getArea();
         CustomerAddress entity = CustomerAddress.builder()
                 .customerUserId(userId)
                 .label(body.getLabel() != null ? body.getLabel() : "Home")
                 .fullName(body.getFullName())
                 .mobile(body.getMobile())
                 .pincode(body.getPincode())
-                .locality(body.getLocality())
+                .locality(resolvedLocality)
+                .area(body.getArea())
                 .addressLine(body.getAddressLine())
-                .city(body.getCity())
+                .city(resolvedCity)
+                .district(body.getDistrict())
+                .taluk(body.getTaluk())
                 .state(body.getState())
                 .latitude(body.getLatitude())
                 .longitude(body.getLongitude())
@@ -143,8 +152,19 @@ public class CustomerProfileController {
         if (body.getMobile() != null) entity.setMobile(body.getMobile());
         if (body.getPincode() != null) entity.setPincode(body.getPincode());
         if (body.getLocality() != null) entity.setLocality(body.getLocality());
+        if (body.getArea() != null) {
+            entity.setArea(body.getArea());
+            // Mirror to legacy `locality` unless the caller also sent explicit locality.
+            if (body.getLocality() == null) entity.setLocality(body.getArea());
+        }
         if (body.getAddressLine() != null) entity.setAddressLine(body.getAddressLine());
         if (body.getCity() != null) entity.setCity(body.getCity());
+        if (body.getDistrict() != null) {
+            entity.setDistrict(body.getDistrict());
+            // Mirror to legacy `city` column unless the caller also sent an explicit city.
+            if (body.getCity() == null) entity.setCity(body.getDistrict());
+        }
+        if (body.getTaluk() != null) entity.setTaluk(body.getTaluk());
         if (body.getState() != null) entity.setState(body.getState());
         if (body.getLatitude() != null) entity.setLatitude(body.getLatitude());
         if (body.getLongitude() != null) entity.setLongitude(body.getLongitude());
@@ -324,8 +344,11 @@ public class CustomerProfileController {
                 .mobile(a.getMobile())
                 .pincode(a.getPincode())
                 .locality(a.getLocality())
+                .area(a.getArea() != null ? a.getArea() : a.getLocality())
                 .addressLine(a.getAddressLine())
                 .city(a.getCity())
+                .district(a.getDistrict() != null ? a.getDistrict() : a.getCity())
+                .taluk(a.getTaluk())
                 .state(a.getState())
                 .latitude(a.getLatitude())
                 .longitude(a.getLongitude())

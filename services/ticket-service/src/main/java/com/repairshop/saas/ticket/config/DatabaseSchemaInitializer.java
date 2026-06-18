@@ -24,6 +24,10 @@ public class DatabaseSchemaInitializer {
             // first in some setups, and the pickup-person estimate flow reads
             // this column. Idempotent ADD COLUMN IF NOT EXISTS is safe.
             addColumnIfMissing("repair_booking_services", "warranty", "VARCHAR(20)");
+            // Boot-time safety net for migration 48 (tickets.customer_address).
+            // The owner Booking Details "Customer Details" card reads this
+            // column; without it the JPA save fails on every ticket mint.
+            addColumnIfMissing("tickets", "customer_address", "TEXT");
         };
     }
 

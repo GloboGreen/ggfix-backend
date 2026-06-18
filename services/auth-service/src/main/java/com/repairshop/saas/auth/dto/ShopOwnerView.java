@@ -75,6 +75,8 @@ public class ShopOwnerView {
         private String openingTime;
         private String closingTime;
         private Boolean isActive;
+        /** Persisted JSON snapshot of selected Android / Apple services. NULL until first save. */
+        private String serviceCategoriesJson;
         private Integer progressPercent;   // derived: % of documents/fields supplied
         private Instant createdAt;
     }

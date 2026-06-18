@@ -8,6 +8,7 @@ import lombok.NoArgsConstructor;
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.List;
 import java.util.UUID;
 
 @Data
@@ -32,8 +33,14 @@ public class TicketResponse {
     @Schema(description = "Customer phone (denormalized)")
     private String customerPhone;
 
+    @Schema(description = "Customer pickup/postal address (denormalized snapshot)")
+    private String customerAddress;
+
     @Schema(description = "Assigned technician ID")
     private UUID assignedTechnicianId;
+
+    @Schema(description = "Timestamp of the assigned technician's explicit accept action; NULL while awaiting acceptance")
+    private java.time.Instant technicianAcceptedAt;
 
     @Schema(description = "Tracking ID")
     private String trackingId;
@@ -64,6 +71,9 @@ public class TicketResponse {
 
     @Schema(description = "Issue description")
     private String issueDescription;
+
+    @Schema(description = "Voice-note recording of the issue (Cloudinary URL). Null when none.")
+    private String issueAudioUrl;
 
     @Schema(description = "Created at")
     private Instant createdAt;
@@ -112,4 +122,22 @@ public class TicketResponse {
 
     @Schema(description = "Short uppercase technician code (first 8 chars of technician id)")
     private String assignedTechnicianCode;
+
+    // ---- Latest customer-visible "Issue Verified & Updated" note ----
+    // Populated from repair_notes by TicketService.toResponse, taking the
+    // most recent row with is_internal=false. Customer + owner detail
+    // screens render these on the "Technician Issue Verified & Updated"
+    // card so the verification is visible without a second API call.
+
+    @Schema(description = "Latest customer-visible compliance note text from repair_notes; null when none has been submitted")
+    private String complianceNote;
+
+    @Schema(description = "Cloudinary URL of the voice note attached to the latest compliance note; null when none")
+    private String complianceAudioUrl;
+
+    @Schema(description = "Image URLs attached to the latest compliance note; empty list when none")
+    private List<String> complianceImageUrls;
+
+    @Schema(description = "Timestamp at which the latest compliance note was created")
+    private Instant complianceVerifiedAt;
 }

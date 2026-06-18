@@ -34,6 +34,12 @@ public class Shop {
     @Column(length = 50)
     private String mobile;
 
+    @Column(name = "mobile_password_hash", columnDefinition = "TEXT")
+    private String mobilePasswordHash;
+
+    @Column(name = "mobile_otp_code", length = 8)
+    private String mobileOtpCode;
+
     @Column(length = 120)
     private String district;
 
@@ -103,6 +109,16 @@ public class Shop {
     @Column(name = "closing_time", length = 16)
     private String closingTime;
 
+    /**
+     * Snapshot of "what this shop repairs" — populated from the Shop Information
+     * screen's two-column Android / Apple grid. JSON shape:
+     *   {"android":["Screen Repair","Battery Replacement"], "apple":[...]}
+     * NULL until the owner first saves the form. Backend treats the value as
+     * opaque text and just round-trips it to the client.
+     */
+    @Column(name = "service_categories_json", columnDefinition = "TEXT")
+    private String serviceCategoriesJson;
+
     @Column(name = "is_active", nullable = false)
     private Boolean isActive = true;
 
@@ -120,6 +136,7 @@ public class Shop {
         if (timezone == null || timezone.isBlank()) timezone = "Asia/Kolkata";
         if (isActive == null) isActive = Boolean.TRUE;
         if (pickupEnabled == null) pickupEnabled = Boolean.FALSE;
+        if (mobileOtpCode == null || mobileOtpCode.isBlank()) mobileOtpCode = "123456";
     }
 
     @PreUpdate

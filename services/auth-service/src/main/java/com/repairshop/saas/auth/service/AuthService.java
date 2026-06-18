@@ -3,6 +3,7 @@ package com.repairshop.saas.auth.service;
 import com.repairshop.saas.auth.dto.CreateShopOwnerRequest;
 import com.repairshop.saas.auth.dto.LoginRequest;
 import com.repairshop.saas.auth.dto.LoginResponse;
+import com.repairshop.saas.auth.dto.ShopLoginRequest;
 import com.repairshop.saas.auth.dto.RegisterRequest;
 import com.repairshop.saas.auth.dto.RegisterResponse;
 import com.repairshop.saas.auth.dto.CreateShopRequest;
@@ -39,6 +40,19 @@ public class AuthService {
     private final PasswordEncoder passwordEncoder;
     private final OtpStore otpStore;
 
+    /**
+     * Unified login. The identifier in {@code request.email} may be either an
+     * email or a mobile number. Resolution order:
+     *
+     *   1. users table (SUPER_ADMIN / SHOP_OWNER / EMPLOYEE roles)
+     *      — looked up by email first, then phone with the usual +91 / 0-prefix
+     *      tolerance. Authenticated against users.password_hash / users.otp_code.
+     *   2. shops table (SHOP_LOGIN) — only attempted when the users-table lookup
+     *      misses. Authenticated against shops.mobile_password_hash /
+     *      shops.mobile_otp_code. Issues a single-shop scoped JWT.
+     *
+     * Default OTP for both flows is 123456 (see migration 54 and User.otp_code default).
+     */
     @Transactional(readOnly = true)
     public LoginResponse login(LoginRequest request) {
         boolean usingOtp = request.getOtp() != null && !request.getOtp().isBlank();
@@ -46,29 +60,84 @@ public class AuthService {
         if (!usingOtp && !usingPwd)
             throw new BadRequestException("Either password or otp is required");
 
-        User user;
+        java.util.Optional<User> userOpt;
         if (request.getShopSlug() != null && !request.getShopSlug().isBlank()) {
             Shop shop = shopRepository.findBySlug(request.getShopSlug())
                     .orElseThrow(() -> new UnauthorizedException("Invalid shop or credentials"));
-            user = userRepository.findByShop_IdAndEmail(shop.getId(), request.getEmail())
-                    .orElseThrow(() -> new UnauthorizedException("Invalid shop or credentials"));
+            userOpt = userRepository.findByShop_IdAndEmail(shop.getId(), request.getEmail());
         } else {
-            user = findUserByEmailOrPhone(request.getEmail())
-                    .orElseThrow(() -> new UnauthorizedException("Invalid credentials"));
+            userOpt = findUserByEmailOrPhone(request.getEmail());
         }
-        if (!user.getIsActive())
-            throw new UnauthorizedException("Account is disabled");
+
+        if (userOpt.isPresent()) {
+            User user = userOpt.get();
+            if (!user.getIsActive())
+                throw new UnauthorizedException("Account is disabled");
+
+            if (usingOtp) {
+                if (user.getOtpCode() == null || !user.getOtpCode().equals(request.getOtp().trim()))
+                    throw new UnauthorizedException("Invalid OTP");
+            } else {
+                if (user.getPasswordHash() == null
+                        || !passwordEncoder.matches(request.getPassword(), user.getPasswordHash()))
+                    throw new UnauthorizedException("Invalid credentials");
+            }
+            return buildLoginResponse(user, null);
+        }
+
+        // Fall through to shop-mobile credentials. Skipped when a shopSlug was
+        // supplied — that path is explicitly a tenant-scoped users-table lookup.
+        if (request.getShopSlug() == null || request.getShopSlug().isBlank()) {
+            java.util.Optional<Shop> shopOpt = findShopByMobile(request.getEmail());
+            if (shopOpt.isPresent()) {
+                ShopLoginRequest shopReq = ShopLoginRequest.builder()
+                        .mobile(request.getEmail())
+                        .password(request.getPassword())
+                        .otp(request.getOtp())
+                        .build();
+                return shopLogin(shopReq);
+            }
+        }
+
+        throw new UnauthorizedException("Invalid credentials");
+    }
+
+    /**
+     * Login by SHOP MOBILE NUMBER (single-shop session). The shop's mobile
+     * authenticates against either shops.mobile_password_hash or
+     * shops.mobile_otp_code. The issued JWT is locked to this shopId via the
+     * loginScope=SHOP claim — switch-shop will reject it. The token's subject
+     * is the shop's owner user, so downstream services still see a userId.
+     */
+    @Transactional(readOnly = true)
+    public LoginResponse shopLogin(ShopLoginRequest request) {
+        boolean usingOtp = request.getOtp() != null && !request.getOtp().isBlank();
+        boolean usingPwd = request.getPassword() != null && !request.getPassword().isBlank();
+        if (!usingOtp && !usingPwd)
+            throw new BadRequestException("Either password or otp is required");
+
+        Shop shop = findShopByMobile(request.getMobile())
+                .orElseThrow(() -> new UnauthorizedException("Invalid shop credentials"));
+        if (!Boolean.TRUE.equals(shop.getIsActive()))
+            throw new UnauthorizedException("Shop is disabled");
+        if (shop.getOwnerUserId() == null)
+            throw new UnauthorizedException("Shop is not linked to an owner — use email login");
 
         if (usingOtp) {
-            if (user.getOtpCode() == null || !user.getOtpCode().equals(request.getOtp().trim()))
+            if (shop.getMobileOtpCode() == null || !shop.getMobileOtpCode().equals(request.getOtp().trim()))
                 throw new UnauthorizedException("Invalid OTP");
         } else {
-            if (user.getPasswordHash() == null
-                    || !passwordEncoder.matches(request.getPassword(), user.getPasswordHash()))
-                throw new UnauthorizedException("Invalid credentials");
+            if (shop.getMobilePasswordHash() == null
+                    || !passwordEncoder.matches(request.getPassword(), shop.getMobilePasswordHash()))
+                throw new UnauthorizedException("Invalid shop credentials");
         }
 
-        return buildLoginResponse(user, null);
+        User owner = userRepository.findById(shop.getOwnerUserId())
+                .orElseThrow(() -> new UnauthorizedException("Shop owner not found"));
+        if (!Boolean.TRUE.equals(owner.getIsActive()))
+            throw new UnauthorizedException("Owner account is disabled");
+
+        return buildShopScopedLoginResponse(owner, shop);
     }
 
     /**
@@ -87,6 +156,42 @@ public class AuthService {
         if (target.getOwnerUserId() == null || !target.getOwnerUserId().equals(userId))
             throw new UnauthorizedException("Shop not owned by this user");
         return buildLoginResponse(user, target.getId());
+    }
+
+    /**
+     * Build a single-shop LoginResponse for shop-mobile logins. Marks
+     * loginScope=SHOP and returns only the authenticated shop in the
+     * shops array so the client knows there's nothing to switch to.
+     */
+    private LoginResponse buildShopScopedLoginResponse(User owner, Shop shop) {
+        String token = jwtService.generateToken(
+                owner.getId(),
+                shop.getId(),
+                owner.getEmail(),
+                List.of(owner.getRole()),
+                "SHOP"
+        );
+        List<LoginResponse.ShopAccess> shopList = List.of(LoginResponse.ShopAccess.builder()
+                .id(shop.getId().toString())
+                .name(shop.getName())
+                .slug(shop.getSlug())
+                .isActive(true)
+                .build());
+        return LoginResponse.builder()
+                .accessToken(token)
+                .tokenType("Bearer")
+                .expiresIn(jwtService.getExpiryMs() / 1000)
+                .userId(owner.getId().toString())
+                .shopId(shop.getId().toString())
+                .shopName(shop.getName())
+                .email(owner.getEmail())
+                .name(owner.getName())
+                .roles(List.of(owner.getRole()))
+                .roleLabel(friendlyEmployeeRoleLabel(owner.getRole()))
+                .shops(shopList)
+                .loginScope("SHOP")
+                .loginType("SHOP_LOGIN")
+                .build();
     }
 
     /**
@@ -117,7 +222,8 @@ public class AuthService {
                 user.getId(),
                 shopId,
                 user.getEmail(),
-                List.of(user.getRole())
+                List.of(user.getRole()),
+                "OWNER"
         );
 
         final UUID activeShopId = activeShop != null ? activeShop.getId() : null;
@@ -142,7 +248,23 @@ public class AuthService {
                 .roles(List.of(user.getRole()))
                 .roleLabel(friendlyEmployeeRoleLabel(user.getRole()))
                 .shops(shopList)
+                .loginScope("OWNER")
+                .loginType(loginTypeForRole(user.getRole()))
                 .build();
+    }
+
+    /**
+     * Map a stored users.role to the wire-level loginType the clients route on.
+     * SHOP_OWNER and SUPER_ADMIN are 1:1; every other employee role (TECHNICIAN,
+     * STAFF, PICKUP_PERSON) collapses to EMPLOYEE so the mobile app can route
+     * them through the technician/employee UI uniformly.
+     */
+    private static String loginTypeForRole(String role) {
+        if (role == null) return "EMPLOYEE";
+        String r = role.trim().toUpperCase();
+        if ("SUPER_ADMIN".equals(r)) return "SUPER_ADMIN";
+        if ("SHOP_OWNER".equals(r))  return "SHOP_OWNER";
+        return "EMPLOYEE";
     }
 
     @Transactional
@@ -348,6 +470,7 @@ public class AuthService {
                     .openingTime(loc.getOpeningTime())
                     .closingTime(loc.getClosingTime())
                     .ownerUserId(owner.getId())
+                    .mobileOtpCode("123456")
                     .isActive(true)
                     .build();
             shop = shopRepository.save(shop);
@@ -385,6 +508,69 @@ public class AuthService {
      * or leading 0). Lets owners log in with either their email or any
      * reasonable form of their phone number.
      */
+    /**
+     * Shop-mobile lookup for the shop-login flow. Tries the raw value first,
+     * then the last-10 digits with the same +91 / 0-prefix variants as the
+     * owner phone resolver so owners can register the number in any common
+     * shape. Returns the first matching ACTIVE shop (mobile is not unique
+     * at the DB level — see migration 54).
+     */
+    private java.util.Optional<Shop> findShopByMobile(String identifier) {
+        if (identifier == null) return java.util.Optional.empty();
+        String trimmed = identifier.trim();
+        if (trimmed.isEmpty()) return java.util.Optional.empty();
+        final java.util.List<Shop> firstHits = shopRepository.findByMobile(trimmed);
+        if (!firstHits.isEmpty()) return firstHits.stream().filter(s -> Boolean.TRUE.equals(s.getIsActive())).findFirst().or(() -> java.util.Optional.of(firstHits.get(0)));
+        String digits = trimmed.replaceAll("[^0-9]", "");
+        if (digits.length() >= 10) {
+            String last10 = digits.substring(digits.length() - 10);
+            for (String variant : java.util.List.of(last10, "0" + last10, "+91 " + last10, "+91" + last10, "91" + last10)) {
+                final java.util.List<Shop> variantHits = shopRepository.findByMobile(variant);
+                if (!variantHits.isEmpty()) return variantHits.stream().filter(s -> Boolean.TRUE.equals(s.getIsActive())).findFirst().or(() -> java.util.Optional.of(variantHits.get(0)));
+            }
+        }
+        return java.util.Optional.empty();
+    }
+
+    /**
+     * Issue (or surface, in dev) an OTP for shop-mobile login. The current
+     * implementation simply returns the existing shops.mobile_otp_code so
+     * developers can complete the flow without an SMS gateway. A real OTP
+     * service would rotate the code here and trigger an SMS send.
+     */
+    @Transactional
+    public String issueShopMobileOtp(String mobile) {
+        Shop shop = findShopByMobile(mobile)
+                .orElseThrow(() -> new BadRequestException("No shop registered for that mobile number"));
+        if (shop.getMobileOtpCode() == null || shop.getMobileOtpCode().isBlank()) {
+            shop.setMobileOtpCode("123456");
+            shopRepository.save(shop);
+        }
+        return shop.getMobileOtpCode();
+    }
+
+    /**
+     * Set/replace the bcrypt password for a shop's mobile login. Owner-only
+     * action enforced at the controller via ownerId path param. Pass an empty
+     * string to clear (disables password login; OTP login still works).
+     */
+    @Transactional
+    public ShopOwnerView setShopMobilePassword(UUID ownerId, UUID shopId, String newPassword) {
+        Shop shop = shopRepository.findById(shopId)
+                .orElseThrow(() -> new BadRequestException("Shop not found: " + shopId));
+        if (shop.getOwnerUserId() == null || !shop.getOwnerUserId().equals(ownerId))
+            throw new BadRequestException("Shop does not belong to this owner");
+        if (newPassword == null || newPassword.isBlank()) {
+            shop.setMobilePasswordHash(null);
+        } else {
+            shop.setMobilePasswordHash(passwordEncoder.encode(newPassword));
+        }
+        shopRepository.save(shop);
+        User owner = userRepository.findById(ownerId)
+                .orElseThrow(() -> new BadRequestException("Owner not found"));
+        return toOwnerView(owner, shopRepository.findByOwnerUserIdOrderByCreatedAtAsc(owner.getId()));
+    }
+
     private java.util.Optional<User> findUserByEmailOrPhone(String identifier) {
         if (identifier == null) return java.util.Optional.empty();
         String trimmed = identifier.trim();
@@ -471,6 +657,7 @@ public class AuthService {
                 .district(s.getDistrict())
                 .state(s.getState())
                 .pincode(s.getPincode())
+                .gstNumber(s.getGstNumber())
                 .latitude(s.getLatitude())
                 .longitude(s.getLongitude())
                 .frontImageUrl(s.getFrontImageUrl())
@@ -607,6 +794,7 @@ public class AuthService {
                 .openingTime(loc.getOpeningTime())
                 .closingTime(loc.getClosingTime())
                 .ownerUserId(owner.getId())
+                .mobileOtpCode("123456")
                 .isActive(true)
                 .build();
         shopRepository.save(shop);
@@ -647,6 +835,7 @@ public class AuthService {
         if (loc.getClosingTime() != null)          shop.setClosingTime(loc.getClosingTime());
         if (loc.getGstCertificateUrl() != null)    shop.setGstCertificateUrl(loc.getGstCertificateUrl());
         if (loc.getUdyamCertificateUrl() != null)  shop.setUdyamCertificateUrl(loc.getUdyamCertificateUrl());
+        if (loc.getServiceCategoriesJson() != null) shop.setServiceCategoriesJson(loc.getServiceCategoriesJson());
         shopRepository.save(shop);
 
         User owner = userRepository.findById(ownerId).orElseThrow(() -> new BadRequestException("Owner not found"));
@@ -714,6 +903,7 @@ public class AuthService {
                 .gstCertificateUrl(s.getGstCertificateUrl())
                 .udyamCertificateUrl(s.getUdyamCertificateUrl())
                 .isActive(s.getIsActive())
+                .serviceCategoriesJson(s.getServiceCategoriesJson())
                 .progressPercent(locationProgressPercent(s))
                 .createdAt(s.getCreatedAt())
                 .build()).toList();

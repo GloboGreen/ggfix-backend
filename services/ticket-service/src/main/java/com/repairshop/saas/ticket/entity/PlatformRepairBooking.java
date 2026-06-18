@@ -27,6 +27,13 @@ public class PlatformRepairBooking {
     @Column(name = "customer_user_id") private UUID customerUserId;
     @Column(name = "shop_id") private UUID shopId;
     @Column(name = "ticket_id") private UUID ticketId;
+    // Denormalized customer snapshot the order-service writes at create time
+    // (migration 30). Used as the ticket-side fallback when mintTicketFromBooking
+    // ran before the snapshot logic learned a field — the owner Booking Details
+    // "Customer Details" card reads these via TicketService.resolveBookingFallback.
+    @Column(name = "customer_name", length = 255) private String customerName;
+    @Column(name = "customer_mobile", length = 50) private String customerMobile;
+    @Column(name = "pickup_address_id") private UUID pickupAddressId;
     @Column(name = "brand_id") private UUID brandId;
     @Column(name = "model_id") private UUID modelId;
     @Column(name = "ram_option_id") private UUID ramOptionId;
@@ -44,6 +51,12 @@ public class PlatformRepairBooking {
     @Column(name = "missing_damage_parts", columnDefinition = "TEXT") private String missingDamageParts;
     @Column(name = "technician_name", length = 120) private String technicianName;
     @Column(name = "technician_code", length = 40) private String technicianCode;
+    // CSV of technician-uploaded post-acceptance image URLs. The order-service
+    // RepairBookingResponse splits this back to a List<String> the customer's
+    // detail screen renders as "Technician Photos". CustomerOrderMirrorService
+    // converts tickets.technician_photos_json (a JSON array) into this CSV on
+    // every mirror so the customer sees the same images the owner does.
+    @Column(name = "technician_photos", columnDefinition = "TEXT") private String technicianPhotos;
     @Column(name = "front_image_url", length = 500) private String frontImageUrl;
     @Column(name = "back_image_url", length = 500) private String backImageUrl;
     @Column(name = "video_url", length = 500) private String videoUrl;

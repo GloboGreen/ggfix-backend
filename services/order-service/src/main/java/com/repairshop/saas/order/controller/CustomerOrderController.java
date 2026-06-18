@@ -54,23 +54,25 @@ public class CustomerOrderController {
         m.put("SERVICE_ACCEPTED",                              "Service Accepted");
         m.put("ASSIGNED_TO_TECHNICIAN",                        "Assigned to Technician");
         m.put("AWAITING_TECHNICIAN_ACCEPTANCE",                "Awaiting Technician Acceptance");
-        m.put("REASSIGNED_TO_TECHNICIAN",                      "Re-Assign to Technician");
+        m.put("REASSIGNED_TO_TECHNICIAN",                      "Re-Assigned to Technician");
         m.put("TECHNICIAN_ACCEPTED_SERVICE",                   "Technician Accepted Service");
         m.put("TECHNICIAN_WORK_STARTED",                       "Technician Work Started");
         m.put("TECHNICIAN_UPLOADED_DEVICE_IMAGES",             "Technician Uploaded Device Images");
-        m.put("TECHNICIAN_COMPLIANCE_ISSUE_VERIFIED_UPDATED",  "Technician Compliance Issue Verified & Updated");
-        m.put("RE_ESTIMATED_CONFIRMED",                        "Re-Estimated Confirmed");
+        m.put("TECHNICIAN_COMPLIANCE_ISSUE_VERIFIED_UPDATED",  "Technician Issue Verified & Updated");
+        m.put("RE_ESTIMATED_CONFIRMED",                        "Service Re-estimated");
         m.put("CUSTOMER_APPROVED",                             "Customer Approved");
         m.put("CUSTOMER_REJECTED",                             "Customer Rejected");
         m.put("IN_REPAIR",                                     "Repair Work In Progress");
-        m.put("PARTS_REQUIRED",                                "Parts Required");
-        m.put("PARTS_REPLACED",                                "Parts Replaced");
+        m.put("PARTS_REQUIRED",                                "Spare Parts Waiting");
+        m.put("PARTS_REPLACED",                                "Spare Parts Replaced");
         m.put("QUALITY_CHECK_STARTED",                         "Quality Check Started");
         m.put("QUALITY_CHECK_COMPLETED",                       "Quality Check Completed");
         m.put("REPAIR_COMPLETED",                              "Repair Completed");
         m.put("READY",                                         "Ready for Delivery");
+        m.put("RETURN_DELIVERY",                               "Return Delivery");
         m.put("DELIVERED",                                     "Delivered to Customer");
-        m.put("CANCELLED",                                     "Work Cancelled");
+        m.put("CANCELLED",                                     "Repair Cancelled");
+        m.put("PICKUP_BOOKING_CREATED",                        "Pickup Booking Created");
         // Pickup-flow keys emitted by /confirm-order and /assign-pickup. Kept
         // in this map so the My Orders Pickup tab also gets a human label.
         m.put("PICKUP_REQUESTED",                            "Pickup Requested");

@@ -197,8 +197,16 @@ public class PickupBookingController {
     }
 
     // Canonical pickup-status keys the pickup person can advance through.
-    // Ordered — each value must follow the previous one. PICKED_UP can also
-    // come after PICKUP_ON_THE_WAY only (no skipping back).
+    // Ordered — each value must follow the previous one (later index can come
+    // from any earlier index when explicitly permitted below).
+    //
+    // REACHED_CUSTOMER_LOCATION is an OPTIONAL step inserted between
+    // PICKUP_ON_THE_WAY and REPAIR_ESTIMATE_PROCESSING. It proves (50m GPS
+    // gate against customer_addresses) that the pickup person actually
+    // arrived at the customer's doorstep. REPAIR_ESTIMATE_PROCESSING still
+    // accepts PICKUP_ON_THE_WAY as a predecessor so legacy in-flight bookings
+    // (and pickups where the customer's address has no GPS) don't get
+    // wedged.
     //
     // REACHED_SHOP requires a GPS check (pickup person must be within
     // SHOP_RADIUS_METERS of the shop's stored lat/lng). RECEIVED_AT_SHOP is
@@ -207,16 +215,19 @@ public class PickupBookingController {
     private static final List<String> PICKUP_FLOW = List.of(
             "PICKUP_PERSON_ASSIGNED",
             "PICKUP_ON_THE_WAY",
+            "REACHED_CUSTOMER_LOCATION",
             "REPAIR_ESTIMATE_PROCESSING",
             "DEVICE_PICKED_UP",
             "REACHED_SHOP",
             "RECEIVED_AT_SHOP"
     );
 
-    // Maximum acceptable distance between the pickup person's GPS reading and
-    // the shop's stored coordinates when they tap "Reached Shop". 50m matches
-    // a typical shop frontage + GPS accuracy floor.
+    // Maximum acceptable distance between the pickup person's GPS reading
+    // and the saved coordinates (shop OR customer pickup address) when they
+    // tap a location-gated transition. 50m matches a typical building
+    // frontage + GPS accuracy floor.
     private static final double SHOP_RADIUS_METERS = 50.0;
+    private static final double CUSTOMER_RADIUS_METERS = 50.0;
 
     // Aliases for the legacy `PICKUP_ASSIGNED` status column / event key so
     // existing in-flight bookings (which were saved before the rename) still
@@ -251,7 +262,8 @@ public class PickupBookingController {
         if (pickupStatus == null) return null;
         return switch (pickupStatus.toUpperCase()) {
             case "PICKUP_PERSON_ASSIGNED", "PICKUP_ASSIGNED", "PICKUP_REASSIGNED",
-                 "PICKUP_ON_THE_WAY", "REPAIR_ESTIMATE_PROCESSING",
+                 "PICKUP_ON_THE_WAY", "REACHED_CUSTOMER_LOCATION",
+                 "REPAIR_ESTIMATE_PROCESSING",
                  "DEVICE_PICKED_UP", "PICKED_UP",
                  "REACHED_SHOP", "RECEIVED_AT_SHOP" -> "IN_PROGRESS";
             case "CANCELLED" -> "CANCELLED";
@@ -334,15 +346,19 @@ public class PickupBookingController {
 
             // Load just the few fields we need for authz + transition guard.
             // Also pull the booking's shop_id so the REACHED_SHOP radius check
-            // can join to shops.latitude/longitude.
+            // can join to shops.latitude/longitude, and the pickup address's
+            // coordinates so the REACHED_CUSTOMER_LOCATION gate has somewhere
+            // to read its lat/lng from.
             Map<String, Object> current;
             try {
                 current = jdbc.queryForMap(
                         "SELECT rb.status, rb.assigned_pickup_person_id, rb.shop_id, rb.booking_number, " +
-                                "rb.customer_user_id, rb.estimate_amount, " +
-                                "s.latitude AS shop_latitude, s.longitude AS shop_longitude " +
+                                "rb.customer_user_id, rb.estimate_amount, rb.pickup_address_id, " +
+                                "s.latitude AS shop_latitude, s.longitude AS shop_longitude, " +
+                                "ca.latitude AS customer_latitude, ca.longitude AS customer_longitude " +
                                 "FROM repair_bookings rb " +
                                 "LEFT JOIN shops s ON s.id = rb.shop_id " +
+                                "LEFT JOIN customer_addresses ca ON ca.id = rb.pickup_address_id " +
                                 "WHERE rb.id = CAST(? AS UUID)",
                         id.toString());
             } catch (Exception e) {
@@ -386,8 +402,21 @@ public class PickupBookingController {
                     return ResponseEntity.badRequest().body(Map.of(
                             "error", "cannot move to PICKUP_ON_THE_WAY from " + currentStatus));
                 }
+                if (target.equals("REACHED_CUSTOMER_LOCATION")
+                        && !"PICKUP_ON_THE_WAY".equalsIgnoreCase(currentStatus)
+                        && !"REACHED_CUSTOMER_LOCATION".equalsIgnoreCase(currentStatus)) {
+                    return ResponseEntity.badRequest().body(Map.of(
+                            "error", "cannot move to REACHED_CUSTOMER_LOCATION from " + currentStatus));
+                }
+                // REPAIR_ESTIMATE_PROCESSING is reachable from either
+                // PICKUP_ON_THE_WAY (pickup person skipped the customer-
+                // location confirmation because the address has no GPS) OR
+                // REACHED_CUSTOMER_LOCATION (the recommended flow). Either
+                // predecessor is allowed so bookings whose customer address
+                // never had lat/lng saved don't get wedged at the new step.
                 if (target.equals("REPAIR_ESTIMATE_PROCESSING")
                         && !"PICKUP_ON_THE_WAY".equalsIgnoreCase(currentStatus)
+                        && !"REACHED_CUSTOMER_LOCATION".equalsIgnoreCase(currentStatus)
                         && !"REPAIR_ESTIMATE_PROCESSING".equalsIgnoreCase(currentStatus)) {
                     return ResponseEntity.badRequest().body(Map.of(
                             "error", "cannot move to REPAIR_ESTIMATE_PROCESSING from " + currentStatus));
@@ -447,6 +476,43 @@ public class PickupBookingController {
                 }
             }
 
+            // GPS radius gate for REACHED_CUSTOMER_LOCATION: same shape as
+            // REACHED_SHOP but against customer_addresses. If the saved
+            // address has no coordinates we ALLOW the transition without a
+            // gate (per product decision) — the pickup person still has to
+            // tap the button, and the event row records whatever lat/lng we
+            // got from the device for an audit trail.
+            if (target.equals("REACHED_CUSTOMER_LOCATION")) {
+                pickupLat = parseDouble(value(body, "latitude"));
+                pickupLng = parseDouble(value(body, "longitude"));
+                Double custLat = parseDouble(stringFrom(current, "customer_latitude"));
+                Double custLng = parseDouble(stringFrom(current, "customer_longitude"));
+                boolean haveCustomerCoords = custLat != null && custLng != null;
+                if (haveCustomerCoords) {
+                    // Customer has GPS on the address: enforce the gate.
+                    if (pickupLat == null || pickupLng == null) {
+                        return ResponseEntity.status(422).body(Map.of(
+                                "error", "location required",
+                                "code", "LOCATION_REQUIRED",
+                                "message", "Enable location and try again."));
+                    }
+                    double meters = haversineMeters(pickupLat, pickupLng, custLat, custLng);
+                    distanceMeters = (int) Math.round(meters);
+                    if (meters > CUSTOMER_RADIUS_METERS) {
+                        return ResponseEntity.status(422).body(Map.of(
+                                "error", "out of radius",
+                                "code", "OUT_OF_RADIUS",
+                                "distanceMeters", distanceMeters,
+                                "radiusMeters", (int) CUSTOMER_RADIUS_METERS,
+                                "message", "You are " + distanceMeters
+                                        + "m away. Reach the customer address (within " + (int) CUSTOMER_RADIUS_METERS + "m) to continue."));
+                    }
+                }
+                // If the customer address has no GPS we accept the tap as-is.
+                // pickupLat / pickupLng may still be set from the body; they
+                // get persisted to the event row below for the audit trail.
+            }
+
             // Update repair_bookings.status (+ the corresponding milestone
             // timestamp). now() works in both Postgres and H2.
             try {
@@ -458,6 +524,10 @@ public class PickupBookingController {
                     jdbc.update(
                             "UPDATE repair_bookings SET status = ?, received_at_shop_at = now(), updated_at = now() WHERE id = CAST(? AS UUID)",
                             target, id.toString());
+                } else if (target.equals("REACHED_CUSTOMER_LOCATION")) {
+                    jdbc.update(
+                            "UPDATE repair_bookings SET status = ?, reached_customer_at = now(), updated_at = now() WHERE id = CAST(? AS UUID)",
+                            target, id.toString());
                 } else {
                     jdbc.update(
                             "UPDATE repair_bookings SET status = ?, updated_at = now() WHERE id = CAST(? AS UUID)",
@@ -468,17 +538,19 @@ public class PickupBookingController {
                 return ResponseEntity.status(500).body(Map.of("error", "update failed: " + e.getMessage()));
             }
 
-            // Append event row. For REACHED_SHOP we also persist the GPS
-            // reading and the computed distance so the radius check is
-            // auditable. Generate UUID in Java to avoid depending on
-            // gen_random_uuid() (which isn't available without pgcrypto in
-            // older Postgres versions or in H2 dialects).
+            // Append event row. For REACHED_SHOP / REACHED_CUSTOMER_LOCATION we
+            // also persist the GPS reading and the computed distance so the
+            // radius check is auditable. Generate UUID in Java to avoid
+            // depending on gen_random_uuid() (which isn't available without
+            // pgcrypto in older Postgres versions or in H2 dialects).
             String note = body != null && body.get("note") != null
                     ? String.valueOf(body.get("note"))
                     : labelFor(target);
             UUID eventId = UUID.randomUUID();
+            boolean isGpsEvent = (target.equals("REACHED_SHOP") || target.equals("REACHED_CUSTOMER_LOCATION"))
+                    && pickupLat != null && pickupLng != null;
             try {
-                if (target.equals("REACHED_SHOP") && pickupLat != null && pickupLng != null) {
+                if (isGpsEvent) {
                     jdbc.update(
                             "INSERT INTO repair_booking_events (id, booking_id, status, note, actor, latitude, longitude, distance_meters, created_at) " +
                                     "VALUES (CAST(? AS UUID), CAST(? AS UUID), ?, ?, ?, ?, ?, ?, now())",
@@ -547,10 +619,15 @@ public class PickupBookingController {
             ok.put("previousStatus", currentStatus == null ? "" : currentStatus);
             if (distanceMeters != null) ok.put("distanceMeters", distanceMeters);
             if (mintedTicketId != null) ok.put("ticketId", mintedTicketId);
-            if (target.equals("REACHED_SHOP") || target.equals("RECEIVED_AT_SHOP")) {
-                ok.put("message", target.equals("REACHED_SHOP")
-                        ? "Pickup person reached the shop successfully."
-                        : "Device received at shop.");
+            if (target.equals("REACHED_SHOP") || target.equals("RECEIVED_AT_SHOP")
+                    || target.equals("REACHED_CUSTOMER_LOCATION")) {
+                if (target.equals("REACHED_SHOP")) {
+                    ok.put("message", "Pickup person reached the shop successfully.");
+                } else if (target.equals("RECEIVED_AT_SHOP")) {
+                    ok.put("message", "Device received at shop.");
+                } else {
+                    ok.put("message", "Reached customer location.");
+                }
             }
             return ResponseEntity.ok(ok);
         } catch (Exception e) {
@@ -638,8 +715,23 @@ public class PickupBookingController {
         try {
             BookingAccess access = requireAssignedPickup(request, id);
             String currentStatus = stringFrom(access.booking, "status");
-            if (!"PICKUP_ON_THE_WAY".equalsIgnoreCase(currentStatus)
-                    && !"REPAIR_ESTIMATE_PROCESSING".equalsIgnoreCase(currentStatus)) {
+            // Allow re-submits any time the pickup person is at or past the
+            // PICKUP_ON_THE_WAY step. The Edit Repair Estimate flow on the
+            // employee app needs to work even after the device has reached
+            // the shop and the ticket has been minted — without that, the
+            // pickup person can't correct a typo in the estimate once they
+            // tap "Reached Shop". Only CANCELLED and the truly-early states
+            // (before the pickup person ever started moving) reject.
+            String s = currentStatus == null ? "" : currentStatus.toUpperCase();
+            if (s.equals("CANCELLED")) {
+                return ResponseEntity.badRequest().body(Map.of(
+                        "error", "booking is cancelled — estimate can't be edited"));
+            }
+            int idx = pickupFlowIndex(s);
+            // -1 ⇒ pre-pickup statuses (ORDER_PLACED, PICKUP_REQUESTED,
+            // PICKUP_ACCEPTED) or junk. 0 ⇒ PICKUP_PERSON_ASSIGNED — still
+            // before the on-the-way step we require here. ≥ 1 is fine.
+            if (idx < 1) {
                 return ResponseEntity.badRequest().body(Map.of(
                         "error", "repair estimate can be submitted only after Pickup On The Way"));
             }
@@ -666,6 +758,66 @@ public class PickupBookingController {
             UUID storageOptionId = parseUuid(value(body, "storageOptionId"));
             String color = firstNonBlank(value(body, "color"));
 
+            // Service schedule alert + device condition fields the pickup
+            // person enters on the Repair Estimate Processing screen. Without
+            // these the owner's "View Details" card shows "Not yet set" and
+            // "Not provided" even after the pickup person submitted the
+            // estimate — the COALESCE keeps customer-entered values when the
+            // pickup person leaves a field blank.
+            Timestamp estimatedReadyAt = parseInstant(firstNonBlank(
+                    value(body, "estimatedReadyAt"),
+                    value(body, "estimatedReadyIso"),
+                    value(body, "serviceScheduleReadyAt")));
+            Timestamp estimatedDeliveryAt = parseInstant(firstNonBlank(
+                    value(body, "estimatedDeliveryAt"),
+                    value(body, "estimatedDeliveryIso"),
+                    value(body, "serviceScheduleDeliveryAt")));
+            String devicePin = firstNonBlank(
+                    value(body, "devicePin"),
+                    value(body, "deviceSecurityValue"),
+                    value(body, "securityValue"));
+            String missingParts = firstNonBlank(
+                    value(body, "missingDamageParts"),
+                    value(body, "missingParts"),
+                    value(body, "damagedParts"));
+            // missingParts may arrive as a JSON array; normalize to the
+            // comma-separated text the repair_bookings.missing_damage_parts
+            // column already stores, so the existing CSV-aware read path in
+            // buildMissingPartsJson() keeps working unchanged.
+            if (missingParts == null) {
+                Object rawMp = body == null ? null : body.get("missingDamageParts");
+                if (rawMp == null && body != null) rawMp = body.get("missingParts");
+                if (rawMp instanceof List<?>) {
+                    StringBuilder sb = new StringBuilder();
+                    for (Object item : (List<?>) rawMp) {
+                        if (item == null) continue;
+                        String piece;
+                        if (item instanceof Map<?, ?>) {
+                            Object name = ((Map<?, ?>) item).get("name");
+                            if (name == null) name = ((Map<?, ?>) item).get("label");
+                            piece = name == null ? null : name.toString();
+                        } else {
+                            piece = item.toString();
+                        }
+                        if (piece == null || piece.isBlank()) continue;
+                        if (sb.length() > 0) sb.append(", ");
+                        sb.append(piece.trim());
+                    }
+                    if (sb.length() > 0) missingParts = sb.toString();
+                }
+            }
+            String customerApproval = mapBooleanToApprovalString(firstNonBlank(
+                    value(body, "customerApproval"),
+                    value(body, "customerRepairApproval")));
+            String imei = firstNonBlank(value(body, "imei"));
+
+            // Only stamp REPAIR_ESTIMATE_PROCESSING when the booking is still
+            // in the on-the-way / estimate-processing phase. Once the device
+            // has been picked up / reached / received at shop, the booking is
+            // owned by the shop-side ticket pipeline and we must NOT regress
+            // its lifecycle to "estimate processing" — that would push the
+            // customer Pickup tab back to IN_PROGRESS and pull the booking
+            // out of the owner's tickets queue.
             jdbc.update(
                     "UPDATE repair_bookings SET " +
                             "estimate_amount = ?, " +
@@ -678,7 +830,21 @@ public class PickupBookingController {
                             "ram_option_id = COALESCE(CAST(? AS UUID), ram_option_id), " +
                             "storage_option_id = COALESCE(CAST(? AS UUID), storage_option_id), " +
                             "color = COALESCE(?, color), " +
-                            "status = 'REPAIR_ESTIMATE_PROCESSING', " +
+                            "estimated_ready_at = COALESCE(?, estimated_ready_at), " +
+                            "estimated_delivery_at = COALESCE(?, estimated_delivery_at), " +
+                            "device_pin = COALESCE(?, device_pin), " +
+                            "missing_damage_parts = COALESCE(?, missing_damage_parts), " +
+                            "customer_approval = COALESCE(?, customer_approval), " +
+                            "imei = COALESCE(?, imei), " +
+                            // Promote the booking to REPAIR_ESTIMATE_PROCESSING when
+                            // submission happens from any pre-pickup state. Includes
+                            // REACHED_CUSTOMER_LOCATION (new optional step between
+                            // PICKUP_ON_THE_WAY and the estimate); without that, the
+                            // employee app's nextStatusFor sees the stale status and
+                            // keeps offering "Repair Estimate" instead of advancing
+                            // to "Device Picked Up".
+                            "status = CASE WHEN UPPER(status) IN ('PICKUP_ON_THE_WAY','REACHED_CUSTOMER_LOCATION','REPAIR_ESTIMATE_PROCESSING') " +
+                            "              THEN 'REPAIR_ESTIMATE_PROCESSING' ELSE status END, " +
                             "updated_at = now() WHERE id = CAST(? AS UUID)",
                     estimate, front, back, video, issueSummary,
                     brandId != null ? brandId.toString() : null,
@@ -686,6 +852,8 @@ public class PickupBookingController {
                     ramOptionId != null ? ramOptionId.toString() : null,
                     storageOptionId != null ? storageOptionId.toString() : null,
                     color,
+                    estimatedReadyAt, estimatedDeliveryAt, devicePin, missingParts, customerApproval,
+                    imei,
                     id.toString());
 
             // Replace the booking's repair_booking_services rows with whatever
@@ -734,6 +902,15 @@ public class PickupBookingController {
                 }
             }
 
+            // If a ticket has already been minted for this booking, re-sync
+            // the pickup-editable fields onto it so the owner-side Booking
+            // Details / Device Details renders the latest estimate. Without
+            // this, the TicketService booking fallback only kicks in for
+            // fields that are still blank — any field the original mint
+            // populated (e.g. issue_description from the first estimate)
+            // would shadow the new value forever.
+            syncTicketFromBookingEdit(id);
+
             String note = "Repair estimate submitted";
             appendEvent(id, "REPAIR_ESTIMATE_PROCESSING", note, "PICKUP_PERSON");
             notifyCustomer(access.booking, id, "REPAIR_ESTIMATE_PROCESSING", "Repair Estimate Processing", note);
@@ -766,6 +943,7 @@ public class PickupBookingController {
             case "PICKUP_ACCEPTED":         return "Pickup Accepted";
             case "PICKUP_PERSON_ASSIGNED":  return "Pickup Person Assigned";
             case "PICKUP_ON_THE_WAY":       return "Pickup Person On The Way";
+            case "REACHED_CUSTOMER_LOCATION": return "Reached Customer Location";
             case "REPAIR_ESTIMATE_PROCESSING": return "Repair Estimate Processing";
             case "DEVICE_PICKED_UP":        return "Device Picked Up";
             case "PICKED_UP":               return "Device Picked Up";
@@ -841,6 +1019,49 @@ public class PickupBookingController {
         }
     }
 
+    /**
+     * Parse an ISO-8601 timestamp the client sends for service-schedule
+     * fields (estimated_ready_at / estimated_delivery_at). Accepts both
+     * full "2026-06-13T12:01:00Z" and the bare "2026-06-13T12:01:00" forms
+     * the mobile app's Date.toISOString() produces. Returns a JDBC-friendly
+     * Timestamp so the COALESCE update binds cleanly without a manual cast.
+     */
+    private static Timestamp parseInstant(String raw) {
+        if (raw == null || raw.isBlank()) return null;
+        String s = raw.trim();
+        try {
+            // Try ISO instant first (covers "...Z" suffix).
+            return Timestamp.from(java.time.Instant.parse(s));
+        } catch (Exception ignore) { /* fall through */ }
+        try {
+            // Naive local-datetime — assume UTC. The mobile app sometimes
+            // strips the trailing Z when constructing dates manually.
+            return Timestamp.from(java.time.LocalDateTime.parse(s).toInstant(java.time.ZoneOffset.UTC));
+        } catch (Exception ignore) { /* fall through */ }
+        try {
+            // OffsetDateTime (with explicit zone offset).
+            return Timestamp.from(java.time.OffsetDateTime.parse(s).toInstant());
+        } catch (Exception ignore) {
+            return null;
+        }
+    }
+
+    /**
+     * Translate the boolean/string the customer-approval submit sends into
+     * the "DONE"/"PENDING" VARCHAR the repair_bookings.customer_approval
+     * column stores. The shop-side ticket conversion (mapCustomerApproval)
+     * round-trips this back to BOOLEAN for the ticket layer, so both
+     * representations stay in sync.
+     */
+    private static String mapBooleanToApprovalString(String raw) {
+        if (raw == null) return null;
+        String s = raw.trim().toUpperCase();
+        if (s.isEmpty()) return null;
+        if (s.equals("TRUE") || s.equals("YES") || s.equals("DONE") || s.equals("APPROVED") || s.equals("1")) return "DONE";
+        if (s.equals("FALSE") || s.equals("NO") || s.equals("PENDING") || s.equals("0")) return "PENDING";
+        return null;
+    }
+
     private static String stringValueOf(Object value) {
         if (value == null) return null;
         String s = value.toString();
@@ -858,6 +1079,102 @@ public class PickupBookingController {
         int idx = issueSummary.indexOf(PICKUP_META_MARKER);
         if (idx == -1) return issueSummary.trim();
         return issueSummary.substring(0, idx).replaceAll("\\s+$", "");
+    }
+
+    /**
+     * Push the pickup-person-editable fields from repair_bookings onto the
+     * already-minted tickets row. No-op when the booking has no ticket yet
+     * (the next mint will write fresh values anyway). Best-effort — a sync
+     * failure should not bubble up and fail the estimate submit.
+     *
+     * Mirrors the same field set the original mint writes (price, issue,
+     * device taxonomy, schedule, security, approval) plus the rebuilt
+     * snapshot JSON columns (price_items_json, device_photos_json,
+     * missing_parts_json, repair_services_summary) so the owner-side
+     * Booking Details / Device Details refresh end-to-end.
+     */
+    private void syncTicketFromBookingEdit(UUID bookingId) {
+        Map<String, Object> bk;
+        try {
+            bk = jdbc.queryForMap(
+                    "SELECT rb.ticket_id, rb.brand_id, rb.model_id, rb.ram_option_id, rb.storage_option_id, " +
+                            "       rb.color, rb.estimate_amount, rb.issue_summary, " +
+                            "       rb.front_image_url, rb.back_image_url, rb.video_url, " +
+                            "       rb.device_pin, rb.missing_damage_parts, " +
+                            "       rb.customer_approval, " +
+                            "       rb.estimated_ready_at, rb.estimated_delivery_at, " +
+                            "       mm.name AS model_name, mm.image_url AS model_image_url, " +
+                            "       mb.name AS brand_name " +
+                            "FROM repair_bookings rb " +
+                            "LEFT JOIN master_models mm ON mm.id = rb.model_id " +
+                            "LEFT JOIN master_brands mb ON mb.id = rb.brand_id " +
+                            "WHERE rb.id = CAST(? AS UUID)",
+                    bookingId.toString());
+        } catch (Exception e) {
+            log.warn("syncTicketFromBookingEdit: booking lookup failed for {}: {}", bookingId, e.getMessage());
+            return;
+        }
+        String ticketId = stringFrom(bk, "ticket_id");
+        if (ticketId == null || ticketId.isBlank()) return;
+
+        Object estimateAmount = bk.get("estimate_amount");
+        String issueDescription = stripPickupMeta(stringFrom(bk, "issue_summary"));
+        String deviceDisplayName = buildDeviceDisplayName(
+                stringFrom(bk, "brand_name"), stringFrom(bk, "model_name"));
+        String repairServicesSummary = buildServicesSummary(bookingId);
+        String priceItemsJson = buildPriceItemsJson(bookingId, estimateAmount);
+        String devicePhotosJson = buildDevicePhotosJson(
+                stringFrom(bk, "front_image_url"),
+                stringFrom(bk, "back_image_url"),
+                stringFrom(bk, "video_url"));
+        String missingPartsJson = buildMissingPartsJson(stringFrom(bk, "missing_damage_parts"));
+        Boolean customerApproval = mapCustomerApproval(stringFrom(bk, "customer_approval"));
+
+        try {
+            jdbc.update(
+                    "UPDATE tickets SET " +
+                            "    brand_id = COALESCE(CAST(? AS UUID), brand_id), " +
+                            "    model_id = COALESCE(CAST(? AS UUID), model_id), " +
+                            "    ram_option_id = COALESCE(CAST(? AS UUID), ram_option_id), " +
+                            "    storage_option_id = COALESCE(CAST(? AS UUID), storage_option_id), " +
+                            "    color = COALESCE(?, color), " +
+                            "    estimated_price = ?, " +
+                            "    issue_description = COALESCE(?, issue_description), " +
+                            "    device_display_name = COALESCE(?, device_display_name), " +
+                            "    device_image_url = COALESCE(?, device_image_url), " +
+                            "    repair_services_summary = COALESCE(?, repair_services_summary), " +
+                            "    price_items_json = COALESCE(?, price_items_json), " +
+                            "    device_photos_json = COALESCE(?, device_photos_json), " +
+                            "    missing_parts_json = COALESCE(?, missing_parts_json), " +
+                            "    device_security_value = COALESCE(?, device_security_value), " +
+                            "    customer_approval = COALESCE(?, customer_approval), " +
+                            "    estimated_ready_at = COALESCE(?, estimated_ready_at), " +
+                            "    estimated_delivery_at = COALESCE(?, estimated_delivery_at), " +
+                            "    updated_at = now() " +
+                            "WHERE id = CAST(? AS UUID)",
+                    stringFrom(bk, "brand_id"),
+                    stringFrom(bk, "model_id"),
+                    stringFrom(bk, "ram_option_id"),
+                    stringFrom(bk, "storage_option_id"),
+                    stringFrom(bk, "color"),
+                    estimateAmount,
+                    issueDescription,
+                    deviceDisplayName,
+                    stringFrom(bk, "model_image_url"),
+                    repairServicesSummary,
+                    priceItemsJson,
+                    devicePhotosJson,
+                    missingPartsJson,
+                    stringFrom(bk, "device_pin"),
+                    customerApproval,
+                    bk.get("estimated_ready_at"),
+                    bk.get("estimated_delivery_at"),
+                    ticketId);
+            log.info("syncTicketFromBookingEdit: booking={} ticket={} synced", bookingId, ticketId);
+        } catch (Exception e) {
+            log.warn("syncTicketFromBookingEdit: UPDATE failed for ticket={} booking={}: {}",
+                    ticketId, bookingId, e.getMessage());
+        }
     }
 
     /**
@@ -912,13 +1229,16 @@ public class PickupBookingController {
                             "       rb.estimate_amount, rb.issue_summary, " +
                             "       rb.front_image_url, rb.back_image_url, rb.video_url, " +
                             "       rb.device_pin, rb.missing_damage_parts, " +
+                            "       rb.customer_approval, rb.pickup_address_id, " +
                             "       rb.estimated_ready_at, rb.estimated_delivery_at, " +
                             "       mm.name AS model_name, mm.image_url AS model_image_url, " +
-                            "       mb.name AS brand_name " +
+                            "       mb.name AS brand_name, " +
+                            "       ca.address_line, ca.locality, ca.city, ca.state, ca.pincode " +
                             "FROM repair_bookings rb " +
                             "LEFT JOIN master_models mm ON mm.id = rb.model_id " +
                             "LEFT JOIN master_brands mb ON mb.id = rb.brand_id " +
                             "LEFT JOIN customer_users cu ON cu.id = rb.customer_user_id " +
+                            "LEFT JOIN customer_addresses ca ON ca.id = rb.pickup_address_id " +
                             "WHERE rb.id = CAST(? AS UUID)",
                     bookingId.toString());
         } catch (Exception e) {
@@ -953,22 +1273,48 @@ public class PickupBookingController {
         Object estimateAmount = bk.get("estimate_amount");
         String priceItemsJson = buildPriceItemsJson(bookingId, estimateAmount);
 
+        // Build snapshot fields for the booking-detail screens. These have to
+        // round-trip into tickets columns so the owner's "View Details" reads
+        // them straight from /tickets/{id} without joining repair_bookings:
+        //   - devicePhotosJson — front/back/video URLs the customer & pickup
+        //     person captured; renders the Device Photos grid.
+        //   - missingPartsJson — CSV/text the customer/pickup-person entered;
+        //     renders the "Device Missing / Damage Parts" card.
+        //   - customerAddress  — assembled from customer_addresses join so
+        //     the Customer Details card shows the pickup address.
+        //   - customerApproval — repair_bookings stores "DONE"/null as a
+        //     VARCHAR; tickets stores BOOLEAN. Translate so the "Customer
+        //     Repair Approval" row reads "Done"/"Pending" correctly.
+        String devicePhotosJson  = buildDevicePhotosJson(
+                stringFrom(bk, "front_image_url"),
+                stringFrom(bk, "back_image_url"),
+                stringFrom(bk, "video_url"));
+        String missingPartsJson  = buildMissingPartsJson(stringFrom(bk, "missing_damage_parts"));
+        String customerAddress   = joinAddress(
+                stringFrom(bk, "address_line"),
+                stringFrom(bk, "locality"),
+                stringFrom(bk, "city"),
+                stringFrom(bk, "state"),
+                stringFrom(bk, "pincode"));
+        Boolean customerApproval = mapCustomerApproval(stringFrom(bk, "customer_approval"));
+
         UUID ticketId = UUID.randomUUID();
         try {
             // Nullable UUID columns: only emit the cast when we have a value
             // (CAST(NULL AS UUID) is harmless, so use a uniform expression).
             jdbc.update(
-                    "INSERT INTO tickets (id, shop_id, customer_id, customer_name, customer_phone, " +
+                    "INSERT INTO tickets (id, shop_id, customer_id, customer_name, customer_phone, customer_address, " +
                             "    tracking_id, brand_id, model_id, ram_option_id, storage_option_id, " +
                             "    color, status, estimated_price, issue_description, " +
                             "    device_display_name, device_image_url, repair_services_summary, " +
-                            "    price_items_json, " +
-                            "    device_security_value, estimated_ready_at, estimated_delivery_at, " +
+                            "    price_items_json, device_photos_json, missing_parts_json, " +
+                            "    device_security_value, customer_approval, " +
+                            "    estimated_ready_at, estimated_delivery_at, " +
                             "    created_at, updated_at) " +
-                            "VALUES (CAST(? AS UUID), CAST(? AS UUID), CAST(? AS UUID), ?, ?, " +
+                            "VALUES (CAST(? AS UUID), CAST(? AS UUID), CAST(? AS UUID), ?, ?, ?, " +
                             "    ?, CAST(? AS UUID), CAST(? AS UUID), CAST(? AS UUID), CAST(? AS UUID), " +
-                            "    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, now(), now())",
-                    ticketId.toString(), shopId.toString(), customerId, customerName, customerPhone,
+                            "    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, now(), now())",
+                    ticketId.toString(), shopId.toString(), customerId, customerName, customerPhone, customerAddress,
                     trackingId,
                     stringFrom(bk, "brand_id"),
                     stringFrom(bk, "model_id"),
@@ -982,7 +1328,10 @@ public class PickupBookingController {
                     stringFrom(bk, "model_image_url"),
                     repairServicesSummary,
                     priceItemsJson,
+                    devicePhotosJson,
+                    missingPartsJson,
                     stringFrom(bk, "device_pin"),
+                    customerApproval,
                     bk.get("estimated_ready_at"),
                     bk.get("estimated_delivery_at"));
         } catch (Exception e) {
@@ -1114,6 +1463,25 @@ public class PickupBookingController {
         }
         if (rows == null || rows.isEmpty()) return null;
 
+        // Dedupe by repair_service_id (or label when the row was never linked
+        // to a master service). The customer-flow → pickup-estimate sequence
+        // could land the same issue twice in repair_booking_services when the
+        // employee app's submit re-sent rows that already existed; without
+        // this guard the customer's Price Summary showed each issue twice.
+        {
+            java.util.Set<String> seen = new java.util.HashSet<>();
+            java.util.List<Map<String, Object>> deduped = new java.util.ArrayList<>(rows.size());
+            for (Map<String, Object> r : rows) {
+                Object idKey = r.get("repairServiceId");
+                Object labelKey = r.get("label");
+                String key = idKey != null ? idKey.toString()
+                        : labelKey != null ? ("label:" + labelKey.toString().toLowerCase()) : null;
+                if (key == null || !seen.add(key)) continue;
+                deduped.add(r);
+            }
+            if (!deduped.isEmpty()) rows = deduped;
+        }
+
         BigDecimal totalFromRows = rows.stream()
                 .map(r -> r.get("amount"))
                 .filter(a -> a instanceof BigDecimal)
@@ -1144,6 +1512,69 @@ public class PickupBookingController {
             log.warn("buildPriceItemsJson: serialize failed for booking={}: {}", bookingId, e.getMessage());
             return null;
         }
+    }
+
+    /**
+     * Serialize the pickup booking's front/back/video URLs into the shape
+     * the DeviceDetailScreen.parseDevicePhotos() expects:
+     *   { "front": "...", "back": "...", "video": "..." }
+     * Returns null when no photo has been captured yet so the screen renders
+     * the "missing photos" CTA instead of showing empty slot URIs.
+     */
+    private static String buildDevicePhotosJson(String front, String back, String video) {
+        Map<String, String> photos = new LinkedHashMap<>();
+        if (front != null && !front.isBlank()) photos.put("front", front);
+        if (back  != null && !back.isBlank())  photos.put("back",  back);
+        if (video != null && !video.isBlank()) photos.put("video", video);
+        if (photos.isEmpty()) return null;
+        try {
+            return new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(photos);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * Convert the free-text/CSV missing_damage_parts string the booking flow
+     * stores into the JSON-array shape DeviceDetailScreen.parseMissingParts()
+     * reads. Accepts either a comma- or newline-separated list, or a single
+     * line (renders as a one-element list). Returns null for empty/blank so
+     * the card renders "Nill" rather than an empty bullet.
+     */
+    private static String buildMissingPartsJson(String raw) {
+        if (raw == null) return null;
+        String trimmed = raw.trim();
+        if (trimmed.isEmpty()) return null;
+        // If the booking already stored a JSON array, pass it through
+        // unchanged so we don't double-encode.
+        if (trimmed.startsWith("[")) return trimmed;
+        List<String> parts = new ArrayList<>();
+        for (String piece : trimmed.split("[,\\n]")) {
+            String p = piece.trim();
+            if (!p.isEmpty()) parts.add(p);
+        }
+        if (parts.isEmpty()) return null;
+        try {
+            return new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(parts);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * Translate the customer_approval VARCHAR ("DONE"/"PENDING"/null) the
+     * repair_bookings table uses into the tickets.customer_approval BOOLEAN.
+     * Anything explicitly "DONE" → true; explicitly "PENDING"/empty → false
+     * so the Service Schedule card renders "Pending" instead of leaving the
+     * field absent (which would imply "not collected yet").
+     */
+    private static Boolean mapCustomerApproval(String raw) {
+        if (raw == null) return null;
+        String s = raw.trim().toUpperCase();
+        if (s.isEmpty()) return null;
+        if (s.equals("DONE") || s.equals("TRUE") || s.equals("YES") || s.equals("APPROVED")) return Boolean.TRUE;
+        if (s.equals("PENDING") || s.equals("FALSE") || s.equals("NO")) return Boolean.FALSE;
+        return null;
     }
 
     // Package-private — see ShopPickupBookingController.
@@ -1180,6 +1611,22 @@ public class PickupBookingController {
                         "rb.color, rb.estimate_amount, rb.final_amount, rb.front_image_url, rb.back_image_url, rb.video_url, " +
                         "rb.brand_id, rb.model_id, rb.ram_option_id, rb.storage_option_id, " +
                         "rb.assigned_pickup_person_id, rb.updated_at, " +
+                        // Customer identity + pickup address — surfaced so the
+                        // PickupEstimateDetail "Customer Details" card has data
+                        // to render. COALESCE against customer_users handles
+                        // older bookings whose denormalized columns were never
+                        // backfilled (migration 47 only ran once); without this
+                        // the screen renders "—" even though the customer
+                        // identity is one JOIN away.
+                        "COALESCE(NULLIF(rb.customer_name, ''),   cu.full_name) AS customer_name, " +
+                        "COALESCE(NULLIF(rb.customer_mobile, ''), cu.mobile)    AS customer_mobile, " +
+                        "rb.pickup_address_id, " +
+                        // Schedule + condition columns the pickup-person estimate
+                        // submit now writes; re-loaded here so the screen's GET
+                        // prefill round-trips the values when the pickup person
+                        // returns to edit a submitted estimate.
+                        "rb.estimated_ready_at, rb.estimated_duration_hours, rb.estimated_delivery_at, " +
+                        "rb.device_pin, rb.missing_damage_parts, rb.customer_approval, rb.imei, " +
                         "mb.name AS brand_name, " +
                         "mm.name AS model_name, " +
                         "mm.image_url AS model_image_url, " +
@@ -1187,6 +1634,7 @@ public class PickupBookingController {
                         "mr.label AS ram_label, " +
                         "ms.label AS storage_label " +
                         "FROM repair_bookings rb " +
+                        "LEFT JOIN customer_users cu ON cu.id = rb.customer_user_id " +
                         "LEFT JOIN master_brands mb ON mb.id = rb.brand_id " +
                         "LEFT JOIN master_models mm ON mm.id = rb.model_id " +
                         "LEFT JOIN master_ram_options mr ON mr.id = rb.ram_option_id " +
@@ -1207,6 +1655,11 @@ public class PickupBookingController {
         out.put("frontImageUrl", stringFrom(row, "front_image_url"));
         out.put("backImageUrl", stringFrom(row, "back_image_url"));
         out.put("videoUrl", stringFrom(row, "video_url"));
+        // Customer card on PickupEstimateDetail reads these three keys.
+        out.put("customerName", stringFrom(row, "customer_name"));
+        out.put("customerMobile", stringFrom(row, "customer_mobile"));
+        String addrId = stringFrom(row, "pickup_address_id");
+        out.put("pickupAddressText", addrId != null ? loadAddressText(addrId) : null);
         out.put("brandId", stringFrom(row, "brand_id"));
         out.put("modelId", stringFrom(row, "model_id"));
         out.put("ramOptionId", stringFrom(row, "ram_option_id"));
@@ -1219,6 +1672,17 @@ public class PickupBookingController {
         out.put("modelImageBase64", stringFrom(row, "model_image_base64"));
         out.put("ramLabel", stringFrom(row, "ram_label"));
         out.put("storageLabel", stringFrom(row, "storage_label"));
+        // Schedule alert + device condition fields the pickup-person screen
+        // pre-fills from on re-entry. Surfacing them on the estimate GET
+        // means an editor session reads back exactly what was submitted.
+        out.put("estimatedReadyAt", row == null ? null : row.get("estimated_ready_at"));
+        out.put("estimatedDurationHours", row == null ? null : row.get("estimated_duration_hours"));
+        out.put("estimatedDeliveryAt", row == null ? null : row.get("estimated_delivery_at"));
+        out.put("devicePin", stringFrom(row, "device_pin"));
+        out.put("deviceSecurityValue", stringFrom(row, "device_pin"));
+        out.put("missingDamageParts", stringFrom(row, "missing_damage_parts"));
+        out.put("customerApproval", stringFrom(row, "customer_approval"));
+        out.put("imei", stringFrom(row, "imei"));
         out.put("services", loadServices(id));
         out.put("events", loadEvents(id));
         return out;

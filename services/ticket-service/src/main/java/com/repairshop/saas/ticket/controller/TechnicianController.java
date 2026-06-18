@@ -109,6 +109,22 @@ public class TechnicianController {
         return technicianService.listPendingLeavesForShop(shopId);
     }
 
+    /**
+     * List shop-wide leave requests filtered by status. Owner uses this for
+     * Approved / Rejected tabs on the Leave Requests screen. Static "/leaves"
+     * path beats "/{id}" in Spring's matching so the request won't be misread
+     * as a per-technician lookup with id="leaves".
+     */
+    @GetMapping("/leaves")
+    @Operation(summary = "List all leave requests for the shop, filtered by status")
+    public List<LeaveRequestResponse> listLeavesByStatus(
+            @RequestParam(required = false) String status,
+            HttpServletRequest request) {
+        UUID shopId = shopIdFrom(request);
+        if (shopId == null) throw new IllegalStateException("Missing shop context");
+        return technicianService.listLeavesForShopByStatus(shopId, status);
+    }
+
     @GetMapping
     @Operation(summary = "List technicians for the shop (for employee management)")
     public List<TechnicianResponse> list(HttpServletRequest request) {

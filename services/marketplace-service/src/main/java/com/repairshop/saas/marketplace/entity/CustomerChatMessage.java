@@ -31,6 +31,15 @@ public class CustomerChatMessage {
     @Column(name = "attachment_url", length = 500)
     private String attachmentUrl;
 
+    // IMAGE | AUDIO | FILE — drives the bubble renderer on both sides.
+    @Column(name = "attachment_type", length = 20)
+    private String attachmentType;
+
+    // Set the first time the counterpart marks the thread as read.
+    // Drives WhatsApp's blue double-tick.
+    @Column(name = "read_at")
+    private Instant readAt;
+
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
 

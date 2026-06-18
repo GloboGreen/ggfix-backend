@@ -17,9 +17,12 @@ public class AddressRequest {
     private String fullName;
     private String mobile;
     private String pincode;
-    private String locality;
-    private String addressLine;
-    private String city;
+    private String locality;       // LEGACY mirror of `area` — API dual-writes
+    private String area;           // canonical "Area" field on the customer-app form
+    private String addressLine;    // a.k.a. "Door no. / Street"
+    private String city;           // legacy — kept for backward-compat readers
+    private String district;
+    private String taluk;
     private String state;
     private BigDecimal latitude;
     private BigDecimal longitude;

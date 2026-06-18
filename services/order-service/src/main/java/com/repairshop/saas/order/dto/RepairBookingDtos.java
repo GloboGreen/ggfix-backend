@@ -48,6 +48,11 @@ public class RepairBookingDtos {
         private String status;
         private String note;
         private String actor;
+        // Optional media on a compliance-note step event. The customer's
+        // service history renders an inline play button + image thumbnails
+        // on the Issue Verified & Updated row when these are present.
+        private String audioUrl;
+        private List<String> imageUrls;
         private Instant createdAt;
     }
 

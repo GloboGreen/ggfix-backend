@@ -49,6 +49,10 @@ public class TicketRequest {
     @Schema(description = "Issue description")
     private String issueDescription;
 
+    @Schema(description = "Hosted URL of the customer's voice-note recording of the issue " +
+            "(Cloudinary). Optional — the booking flow accepts text, audio, or both.")
+    private String issueAudioUrl;
+
     @Schema(description = "Estimated price")
     private BigDecimal estimatedPrice;
 

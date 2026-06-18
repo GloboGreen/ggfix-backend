@@ -24,8 +24,11 @@ public class AddressResponse {
     private String mobile;
     private String pincode;
     private String locality;
+    private String area;
     private String addressLine;
     private String city;
+    private String district;
+    private String taluk;
     private String state;
     private BigDecimal latitude;
     private BigDecimal longitude;

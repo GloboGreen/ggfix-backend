@@ -14,8 +14,12 @@ import lombok.NoArgsConstructor;
 @Schema(description = "Login request")
 public class LoginRequest {
 
-    @NotBlank(message = "Email is required")
-    @Schema(description = "User email", example = "owner@greenmobiles.com", required = true)
+    @NotBlank(message = "Email or mobile is required")
+    @Schema(description = "Login identifier. Accepts email or mobile number — the server tries users-table " +
+            "(SHOP_OWNER / SUPER_ADMIN / EMPLOYEE) first, then falls back to shop-mobile credentials (SHOP_LOGIN). " +
+            "Field name kept as `email` for backward compatibility.",
+            example = "owner@example.com or 9876543210",
+            required = true)
     private String email;
 
     @Schema(description = "Password (one of password or otp is required)", example = "********")

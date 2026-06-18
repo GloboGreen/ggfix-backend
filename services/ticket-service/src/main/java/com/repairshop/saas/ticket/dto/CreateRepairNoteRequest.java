@@ -7,6 +7,8 @@ import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
+import java.util.List;
+
 @Data
 @NoArgsConstructor
 @AllArgsConstructor
@@ -20,4 +22,10 @@ public class CreateRepairNoteRequest {
 
     @Schema(description = "Hide from customer? Defaults to false (visible to customer + shop)")
     private Boolean isInternal;
+
+    @Schema(description = "Cloudinary URL of the optional voice-note recording attached to this note.")
+    private String audioUrl;
+
+    @Schema(description = "Optional list of Cloudinary image URLs attached to this note (up to 3).")
+    private List<String> imageUrls;
 }

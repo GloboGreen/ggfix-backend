@@ -34,6 +34,9 @@ public class PlatformCustomerUser {
 
     private String mobile;
 
+    @Column(name = "id_proof_url")
+    private String idProofUrl;
+
     @Column(name = "is_active")
     private Boolean isActive;
 

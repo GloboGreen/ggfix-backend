@@ -35,11 +35,20 @@ public class PlatformCustomerAddress {
     @Column(name = "locality")
     private String locality;
 
+    @Column(name = "area")
+    private String area;
+
     @Column(name = "address_line")
     private String addressLine;
 
     @Column(name = "city")
     private String city;
+
+    @Column(name = "district")
+    private String district;
+
+    @Column(name = "taluk")
+    private String taluk;
 
     @Column(name = "state")
     private String state;

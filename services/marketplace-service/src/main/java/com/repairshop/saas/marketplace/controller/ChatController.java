@@ -5,9 +5,9 @@ import com.repairshop.saas.marketplace.dto.ChatSendRequest;
 import com.repairshop.saas.marketplace.dto.ChatThreadResponse;
 import com.repairshop.saas.marketplace.entity.CustomerChatMessage;
 import com.repairshop.saas.marketplace.entity.CustomerChatThread;
-import com.repairshop.saas.marketplace.exception.ResourceNotFoundException;
-import com.repairshop.saas.marketplace.repository.CustomerChatMessageRepository;
-import com.repairshop.saas.marketplace.repository.CustomerChatThreadRepository;
+import com.repairshop.saas.marketplace.service.ChatService;
+import com.repairshop.saas.marketplace.service.ChatService.Side;
+import com.repairshop.saas.marketplace.service.ChatSnapshotService;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
@@ -15,8 +15,8 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.server.ResponseStatusException;
 
-import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 @RestController
@@ -24,83 +24,71 @@ import java.util.UUID;
 @RequiredArgsConstructor
 public class ChatController {
 
-    private final CustomerChatThreadRepository threadRepo;
-    private final CustomerChatMessageRepository msgRepo;
+    private final ChatService chat;
+    private final ChatSnapshotService snapshots;
 
     @GetMapping
     public ResponseEntity<List<ChatThreadResponse>> list(HttpServletRequest req) {
         UUID userId = callerId(req);
-        return ResponseEntity.ok(threadRepo.findByCustomerUserIdOrderByLastMessageAtDesc(userId).stream()
-                .map(this::toThreadResp).toList());
+        snapshots.touchCustomerPresence(userId);
+        List<ChatThreadResponse> out = chat.listForCustomer(userId).stream()
+            .map(t -> chat.toThreadResponse(t, Side.CUSTOMER))
+            .toList();
+        return ResponseEntity.ok(out);
     }
 
     @PostMapping
     public ResponseEntity<ChatThreadResponse> open(HttpServletRequest req, @RequestParam("shopId") UUID shopId) {
         UUID userId = callerId(req);
-        CustomerChatThread thread = threadRepo.findByCustomerUserIdAndShopId(userId, shopId)
-                .orElseGet(() -> threadRepo.save(CustomerChatThread.builder()
-                        .customerUserId(userId)
-                        .shopId(shopId)
-                        .subject("Conversation")
-                        .build()));
-        return ResponseEntity.ok(toThreadResp(thread));
+        snapshots.touchCustomerPresence(userId);
+        CustomerChatThread t = chat.openCustomerThread(userId, shopId);
+        return ResponseEntity.ok(chat.toThreadResponse(t, Side.CUSTOMER));
     }
 
     @GetMapping("/{threadId}/messages")
     public ResponseEntity<List<ChatMessageResponse>> messages(HttpServletRequest req, @PathVariable UUID threadId) {
         UUID userId = callerId(req);
-        ensureOwner(userId, threadId);
-        return ResponseEntity.ok(msgRepo.findByThreadIdOrderByCreatedAtAsc(threadId).stream()
-                .map(this::toMsgResp).toList());
+        snapshots.touchCustomerPresence(userId);
+        chat.requireOwnedByCustomer(threadId, userId);
+        List<ChatMessageResponse> out = chat.messagesFor(threadId).stream()
+            .map(chat::toMessageResponse).toList();
+        return ResponseEntity.ok(out);
     }
 
     @PostMapping("/{threadId}/messages")
     public ResponseEntity<ChatMessageResponse> send(HttpServletRequest req, @PathVariable UUID threadId, @RequestBody ChatSendRequest body) {
         UUID userId = callerId(req);
-        CustomerChatThread t = threadRepo.findById(threadId)
-                .orElseThrow(() -> new ResourceNotFoundException("Thread not found: " + threadId));
-        if (!t.getCustomerUserId().equals(userId)) {
-            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Not your thread");
-        }
-        CustomerChatMessage m = msgRepo.save(CustomerChatMessage.builder()
-                .threadId(threadId)
-                .sender("CUSTOMER")
-                .body(body.getBody())
-                .attachmentUrl(body.getAttachmentUrl())
-                .build());
-        t.setLastMessageAt(Instant.now());
-        t.setLastMessagePreview(body.getBody() != null && body.getBody().length() > 200 ? body.getBody().substring(0, 200) : body.getBody());
-        threadRepo.save(t);
-        return ResponseEntity.ok(toMsgResp(m));
+        snapshots.touchCustomerPresence(userId);
+        chat.requireOwnedByCustomer(threadId, userId);
+        CustomerChatMessage m = chat.send(threadId, Side.CUSTOMER, body);
+        return ResponseEntity.ok(chat.toMessageResponse(m));
     }
 
-    private void ensureOwner(UUID userId, UUID threadId) {
-        CustomerChatThread t = threadRepo.findById(threadId)
-                .orElseThrow(() -> new ResourceNotFoundException("Thread not found: " + threadId));
-        if (!t.getCustomerUserId().equals(userId)) {
-            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Not your thread");
-        }
+    @PostMapping("/{threadId}/read")
+    public ResponseEntity<Void> markRead(HttpServletRequest req, @PathVariable UUID threadId) {
+        UUID userId = callerId(req);
+        snapshots.touchCustomerPresence(userId);
+        chat.requireOwnedByCustomer(threadId, userId);
+        chat.markRead(threadId, Side.CUSTOMER);
+        return ResponseEntity.noContent().build();
     }
 
-    private ChatThreadResponse toThreadResp(CustomerChatThread t) {
-        return ChatThreadResponse.builder()
-                .id(t.getId())
-                .shopId(t.getShopId())
-                .subject(t.getSubject())
-                .lastMessagePreview(t.getLastMessagePreview())
-                .lastMessageAt(t.getLastMessageAt())
-                .build();
+    @PostMapping("/{threadId}/typing")
+    public ResponseEntity<Void> typing(HttpServletRequest req, @PathVariable UUID threadId,
+                                       @RequestBody(required = false) Map<String, Object> body) {
+        UUID userId = callerId(req);
+        snapshots.touchCustomerPresence(userId);
+        chat.requireOwnedByCustomer(threadId, userId);
+        boolean typing = body == null || body.get("typing") == null || Boolean.parseBoolean(String.valueOf(body.get("typing")));
+        chat.setTyping(threadId, Side.CUSTOMER, typing);
+        return ResponseEntity.noContent().build();
     }
 
-    private ChatMessageResponse toMsgResp(CustomerChatMessage m) {
-        return ChatMessageResponse.builder()
-                .id(m.getId())
-                .threadId(m.getThreadId())
-                .sender(m.getSender())
-                .body(m.getBody())
-                .attachmentUrl(m.getAttachmentUrl())
-                .createdAt(m.getCreatedAt())
-                .build();
+    @PostMapping("/presence")
+    public ResponseEntity<Void> presence(HttpServletRequest req) {
+        UUID userId = callerId(req);
+        snapshots.touchCustomerPresence(userId);
+        return ResponseEntity.noContent().build();
     }
 
     private UUID callerId(HttpServletRequest req) {

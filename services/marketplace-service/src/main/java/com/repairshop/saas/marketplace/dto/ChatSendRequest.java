@@ -1,6 +1,5 @@
 package com.repairshop.saas.marketplace.dto;
 
-import jakarta.validation.constraints.NotBlank;
 import lombok.*;
 
 @Data
@@ -9,8 +8,11 @@ import lombok.*;
 @Builder
 public class ChatSendRequest {
 
-    @NotBlank
+    // Either body (text) or attachmentUrl (media-only message) must be present.
+    // Both are allowed when a message has a caption.
     private String body;
 
     private String attachmentUrl;
+
+    private String attachmentType; // IMAGE | AUDIO | FILE
 }

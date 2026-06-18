@@ -48,6 +48,10 @@ public interface TicketRepository extends JpaRepository<Ticket, UUID> {
 
     long countByShopId(UUID shopId);
 
+    long countByShopIdAndCustomerId(UUID shopId, UUID customerId);
+
+    Optional<Ticket> findFirstByShopIdAndCustomerIdOrderByCreatedAtDesc(UUID shopId, UUID customerId);
+
     long countByShopIdAndStatus(UUID shopId, String status);
 
     long countByShopIdAndAssignedTechnicianIdNotNull(UUID shopId);

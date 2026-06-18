@@ -40,11 +40,20 @@ public class CustomerAddress {
     @Column(name = "locality", length = 255)
     private String locality;
 
+    @Column(name = "area", length = 255)
+    private String area;
+
     @Column(name = "address_line", columnDefinition = "TEXT")
     private String addressLine;
 
     @Column(name = "city", length = 255)
     private String city;
+
+    @Column(name = "district", length = 255)
+    private String district;
+
+    @Column(name = "taluk", length = 255)
+    private String taluk;
 
     @Column(name = "state", length = 255)
     private String state;

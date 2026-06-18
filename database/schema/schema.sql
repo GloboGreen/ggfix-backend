@@ -383,6 +383,7 @@ CREATE TABLE customer_users (
     mobile              VARCHAR(50) UNIQUE,
     alternate_mobile    VARCHAR(50),
     profile_image_url   VARCHAR(500),
+    id_proof_url        VARCHAR(1000),
     password_hash       VARCHAR(255),
     is_active           BOOLEAN DEFAULT true,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -399,9 +400,12 @@ CREATE TABLE customer_addresses (
     full_name           VARCHAR(255),
     mobile              VARCHAR(50),
     pincode             VARCHAR(20),
-    locality            VARCHAR(255),
-    address_line        TEXT,
-    city                VARCHAR(255),
+    locality            VARCHAR(255), -- LEGACY: prefer area. API dual-writes area -> locality for back-compat readers.
+    area                VARCHAR(255), -- shown as "Area" in the customer-app form
+    address_line        TEXT,         -- shown as "Door no. / Street" in the customer-app form
+    city                VARCHAR(255), -- LEGACY: prefer district. API dual-writes district -> city for back-compat readers.
+    district            VARCHAR(255),
+    taluk               VARCHAR(255),
     state               VARCHAR(255),
     latitude            DECIMAL(10, 7),
     longitude           DECIMAL(10, 7),
